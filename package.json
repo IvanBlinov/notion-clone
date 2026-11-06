@@ -1,0 +1,26 @@
+{
+  "name": "notion-clone",
+  "version": "1.0.0",
+  "description": "A Notion-style workspace (GitHub Pages + Convex) with an MCP server so AI agents can create and edit pages",
+  "scripts": {
+    "dev": "node scripts/build-web.js && node scripts/serve.js",
+    "convex": "convex dev",
+    "build": "node scripts/build-web.js",
+    "import-data": "node scripts/import-data.js",
+    "mcp": "node src/mcp-stdio.js",
+    "test": "node test/smoke.js"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "convex": "^1.49.0",
+    "zod": "^4.6.7"
+  },
+  "type": "module",
+  "bin": {
+    "notion-clone-mcp": "src/mcp-stdio.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
