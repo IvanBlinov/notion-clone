@@ -33,9 +33,11 @@ async function inviteHeader(token) {
   };
 }
 
-export async function renderAuth({ inviteToken = null } = {}) {
+export async function renderAuth({ inviteToken = null, connecting = false } = {}) {
   const status = await query(cx.auth.status, {});
-  const { html: inviteHtml, info } = await inviteHeader(inviteToken);
+  const header = await inviteHeader(inviteToken);
+  const { info } = header;
+  const inviteHtml = header.html || (connecting ? '<div class="auth-invite">Log in to connect an app to your workspace.</div>' : '');
   const canSignup = status.openSignup || !!info;
   let mode = !status.hasUsers || (info && !info.email) ? 'signup' : info ? 'signup' : 'login';
 
@@ -130,5 +132,64 @@ export async function renderAcceptInvite(token, me) {
     await mutation(cx.auth.logOut, { session: session.get() }).catch(() => {});
     session.clear();
     location.reload();
+  });
+}
+
+/** An app (ChatGPT, a claude.ai connector, …) asks for access through OAuth. */
+export async function renderConsent(params, me) {
+  const p = Object.fromEntries(params);
+  const done = (url) => {
+    sessionStorage.removeItem('oauth');
+    location.href = url;
+  };
+  const client = await query(cx.oauth.clientInfo, { clientId: p.client_id || '', redirectUri: p.redirect_uri || '' }).catch(() => ({ valid: false }));
+  if (!client.valid) {
+    sessionStorage.removeItem('oauth');
+    const el = shell(`<h1>Can't connect this app</h1><p class="auth-sub">The request is invalid or has expired. Start connecting again from the app.</p><button class="auth-btn" data-home>Go to my workspace</button>`);
+    el.querySelector('[data-home]').addEventListener('click', goHome);
+    return;
+  }
+  const saved = localStorage.getItem('ws');
+  const options = me.workspaces
+    .map((w) => `<option value="${esc(w.id)}" ${w.id === saved ? 'selected' : ''}>${esc(w.name)}${w.role === 'owner' ? '' : ' (member)'}</option>`)
+    .join('');
+  const el = shell(`
+    <h1>Connect ${esc(client.name)}</h1>
+    <p class="auth-sub"><b>${esc(client.name)}</b> (${esc(client.redirectHost)}) wants to read, create and edit pages in your workspace, and move pages to Trash. It can't delete pages permanently.</p>
+    <form class="auth-form">
+      <label>Workspace<select name="workspace">${options}</select></label>
+      <p class="auth-sub">Signed in as ${esc(me.user.email)}. You can disconnect it anytime in Settings &amp; members → AI agent.</p>
+      <div class="auth-error" hidden></div>
+      <button class="auth-btn" type="submit">Allow</button>
+      <button class="auth-btn secondary" type="button" data-deny>Cancel</button>
+    </form>`);
+  const form = el.querySelector('form');
+  el.querySelector('[data-deny]').addEventListener('click', () => {
+    const u = new URL(p.redirect_uri);
+    u.searchParams.set('error', 'access_denied');
+    if (p.state) u.searchParams.set('state', p.state);
+    done(u.toString());
+  });
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const btn = form.querySelector('button[type=submit]');
+    btn.disabled = true;
+    try {
+      const r = await action(cx.oauth.approve, {
+        session: session.get(),
+        workspaceId: form.workspace.value,
+        clientId: p.client_id,
+        redirectUri: p.redirect_uri,
+        codeChallenge: p.code_challenge || '',
+        state: p.state || undefined,
+        scope: p.scope || undefined,
+      });
+      done(r.redirect);
+    } catch (err) {
+      const errEl = form.querySelector('.auth-error');
+      errEl.textContent = err.message;
+      errEl.hidden = false;
+      btn.disabled = false;
+    }
   });
 }

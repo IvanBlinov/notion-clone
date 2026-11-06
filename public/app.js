@@ -404,7 +404,7 @@ pagesLabel.addEventListener('drop', (e) => {
 // =====================================================================
 const currentRouteId = () => {
   const r = decodeURIComponent(location.hash.replace(/^#\/?/, ''));
-  return r && !r.startsWith('invite/') ? r : null;
+  return r && !r.startsWith('invite/') && !r.startsWith('oauth') ? r : null;
 };
 function go(id) {
   if (currentRouteId() === id) return;
@@ -2533,14 +2533,30 @@ $('#scroller').addEventListener('scroll', () => {
 // =====================================================================
 // Boot
 // =====================================================================
+// A connect request (#/oauth?…) opened in a tab that already runs the app: restart into the consent screen.
+addEventListener('hashchange', () => {
+  if (/^#\/oauth\?/.test(location.hash)) location.reload();
+});
+
 (async function boot() {
   const invite = location.hash.match(/^#\/invite\/([^/?#]+)/);
+  // An app asking to connect (OAuth). Kept in sessionStorage so it survives logging in.
+  const oauthMatch = location.hash.match(/^#\/oauth\?(.*)$/);
+  if (oauthMatch) {
+    sessionStorage.setItem('oauth', oauthMatch[1]);
+    history.replaceState(null, '', location.pathname);
+  }
+  const oauth = sessionStorage.getItem('oauth');
   let me = null;
   if (session.get()) me = await query(cx.auth.me, { session: session.get() }).catch(() => null);
   if (!me) {
     session.clear();
     const account = await import('./account.js');
-    return account.renderAuth({ inviteToken: invite ? decodeURIComponent(invite[1]) : null });
+    return account.renderAuth({ inviteToken: invite ? decodeURIComponent(invite[1]) : null, connecting: !!oauth });
+  }
+  if (oauth) {
+    const account = await import('./account.js');
+    return account.renderConsent(new URLSearchParams(oauth), me);
   }
   if (invite) {
     const account = await import('./account.js');

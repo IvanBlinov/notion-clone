@@ -24,11 +24,16 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - id: pages
+        uses: actions/configure-pages@v5
+      - name: Tell Convex where the site lives (OAuth sends people there to sign in)
+        env:
+          CONVEX_DEPLOY_KEY: ${{ secrets.CONVEX_DEPLOY_KEY }}
+        run: npx convex env set WEB_URL "${{ steps.pages.outputs.base_url }}/"
       - name: Deploy Convex functions, then build the site against that deployment
         env:
           CONVEX_DEPLOY_KEY: ${{ secrets.CONVEX_DEPLOY_KEY }}
         run: npx convex deploy --typecheck disable --cmd "node scripts/build-web.js" --cmd-url-env-var-name CONVEX_URL
-      - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
           path: dist

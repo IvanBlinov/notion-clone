@@ -287,11 +287,12 @@ kbd { font-family: var(--font); font-size: 11px; color: var(--text-3); margin-le
 .auth-ws { font-size: 18px; font-weight: 700; color: var(--text); margin-top: 2px; }
 .auth-form { display: flex; flex-direction: column; gap: 12px; margin-top: 14px; }
 .auth-form label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; font-weight: 600; color: var(--text-2); }
-.auth-form input { padding: 9px 11px; border: 1px solid var(--border); border-radius: 6px; background: var(--hover); color: var(--text); font: inherit; font-size: 14px; outline: none; }
-.auth-form input:focus { border-color: var(--accent); }
+.auth-form input, .auth-form select { padding: 9px 11px; border: 1px solid var(--border); border-radius: 6px; background: var(--hover); color: var(--text); font: inherit; font-size: 14px; outline: none; }
+.auth-form input:focus, .auth-form select:focus { border-color: var(--accent); }
 .auth-form input[readonly] { opacity: 0.7; }
 .auth-btn { width: 100%; padding: 10px; border-radius: 6px; background: var(--accent); color: #fff; font-weight: 600; margin-top: 4px; }
 .auth-btn:disabled { opacity: 0.6; cursor: default; }
+.auth-btn.secondary { background: transparent; color: var(--text); border: 1px solid var(--border); font-weight: 500; }
 .auth-error, .auth-note.error { color: #eb5757; font-size: 13px; }
 .auth-note { margin-bottom: 12px; }
 .auth-switch { margin-top: 16px; font-size: 13px; color: var(--text-3); text-align: center; }

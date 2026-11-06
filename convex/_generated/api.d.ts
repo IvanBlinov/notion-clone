@@ -15,6 +15,7 @@ import type * as crons from "../crons.js";
 import type * as http from "../http.js";
 import type * as lib_sha256 from "../lib/sha256.js";
 import type * as lib_util from "../lib/util.js";
+import type * as oauth from "../oauth.js";
 import type * as pages from "../pages.js";
 import type * as presence from "../presence.js";
 import type * as testing from "../testing.js";
@@ -34,6 +35,7 @@ declare const fullApi: ApiFromModules<{
   http: typeof http;
   "lib/sha256": typeof lib_sha256;
   "lib/util": typeof lib_util;
+  oauth: typeof oauth;
   pages: typeof pages;
   presence: typeof presence;
   testing: typeof testing;

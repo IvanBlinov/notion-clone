@@ -53,6 +53,26 @@ export default defineSchema({
     .index('by_tokenHash', ['tokenHash'])
     .index('by_workspace_user', ['workspaceId', 'userId']),
 
+  // OAuth 2.1 for MCP clients that can't send a fixed header (ChatGPT, claude.ai connectors).
+  // Clients register themselves (RFC 7591); an approved code is exchanged for an agent token.
+  oauthClients: defineTable({
+    clientId: v.string(),
+    name: v.string(),
+    redirectUris: v.array(v.string()),
+    createdAt: v.number(),
+  }).index('by_clientId', ['clientId']),
+
+  oauthCodes: defineTable({
+    codeHash: v.string(),
+    clientId: v.string(),
+    userId: v.id('users'),
+    workspaceId: v.id('workspaces'),
+    redirectUri: v.string(),
+    codeChallenge: v.string(),
+    scope: v.string(),
+    expiresAt: v.number(),
+  }).index('by_codeHash', ['codeHash']),
+
   // One row per page. `pid` is the page's stable id used in URLs, parentId and page blocks.
   pages: defineTable({
     workspaceId: v.id('workspaces'),

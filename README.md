@@ -66,6 +66,8 @@ Open **Settings & members → AI agent → Create token**. The dialog shows read
 claude mcp add --scope user --transport http notion-clone https://<deployment>.convex.site/mcp --header "Authorization: Bearer nca_…"
 ```
 
+**ChatGPT, claude.ai and other apps that use OAuth:** add a custom connector with the URL `https://<deployment>.convex.site/mcp` and OAuth authentication (no client ID or secret needed: the app registers itself). The app opens this site, you log in, pick a workspace and click **Allow**. The app then shows up under **Settings & members → AI agent** as "<app> (connected)", where you can revoke it. OAuth needs the Convex environment variable `WEB_URL` (the site's address); the deploy workflow sets it.
+
 For stdio-only clients (Claude Desktop) run the bridge from a checkout of this repo: `node src/mcp-stdio.js` with `NOTION_URL=https://<deployment>.convex.site` and `NOTION_TOKEN=nca_…`.
 
 | Tool | What it does |

@@ -136,6 +136,51 @@ assert.equal(conflict.status, 409);
 assert.ok(conflict.page.blocks.length > 0);
 step('editor: removing a page block trashes it; stale saves get 409 with the fresh page');
 
+// ---------- OAuth (ChatGPT / claude.ai connectors) ----------
+const noAuth = await fetch(`${SITE}/mcp`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+assert.equal(noAuth.status, 401);
+const prmUrl = noAuth.headers.get('www-authenticate').match(/resource_metadata="([^"]+)"/)[1];
+const prm = await (await fetch(prmUrl)).json();
+assert.equal(prm.resource, `${SITE}/mcp`);
+const asMeta = await (await fetch(`${prm.authorization_servers[0]}/.well-known/oauth-authorization-server`)).json();
+assert.deepEqual(asMeta.code_challenge_methods_supported, ['S256']);
+const REDIRECT = 'https://chatgpt.com/connector_platform_oauth_redirect';
+assert.equal((await fetch(asMeta.registration_endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ redirect_uris: ['http://evil.example/cb'] }) })).status, 400);
+const reg = await (await fetch(asMeta.registration_endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ client_name: 'ChatGPT', redirect_uris: [REDIRECT] }) })).json();
+const { createHash, randomBytes } = await import('node:crypto');
+const verifier = randomBytes(32).toString('base64url');
+const challenge = createHash('sha256').update(verifier).digest('base64url');
+const authz = new URL(asMeta.authorization_endpoint);
+Object.entries({ response_type: 'code', client_id: reg.client_id, redirect_uri: REDIRECT, code_challenge: challenge, code_challenge_method: 'S256', state: 'xyz', scope: 'pages' }).forEach(([k, v]) => authz.searchParams.set(k, v));
+const toConsent = await fetch(authz, { redirect: 'manual' });
+assert.equal(toConsent.status, 302);
+const consent = new URL(toConsent.headers.get('location'));
+assert.match(consent.hash, /^#\/oauth\?/);
+const cp = new URLSearchParams(consent.hash.slice('#/oauth?'.length));
+const badRedirect = new URL(authz);
+badRedirect.searchParams.set('redirect_uri', 'https://evil.example/cb');
+assert.equal((await fetch(badRedirect, { redirect: 'manual' })).status, 400);
+assert.equal((await c.query(api.oauth.clientInfo, { clientId: reg.client_id, redirectUri: REDIRECT })).name, 'ChatGPT');
+const approve = (codeChallenge) =>
+  c.action(api.oauth.approve, { session: alice.session, workspaceId: ws.id, clientId: cp.get('client_id'), redirectUri: cp.get('redirect_uri'), codeChallenge, state: cp.get('state'), scope: cp.get('scope') });
+const back = new URL((await approve(cp.get('code_challenge'))).redirect);
+assert.equal(back.origin + back.pathname, REDIRECT);
+assert.equal(back.searchParams.get('state'), 'xyz');
+const exchange = (code, code_verifier) =>
+  fetch(asMeta.token_endpoint, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ grant_type: 'authorization_code', code, code_verifier, client_id: reg.client_id, redirect_uri: REDIRECT }) });
+const wrongVerifier = await exchange(new URL((await approve(cp.get('code_challenge'))).redirect).searchParams.get('code'), randomBytes(32).toString('base64url'));
+assert.equal((await wrongVerifier.json()).error, 'invalid_grant');
+const tok = await exchange(back.searchParams.get('code'), verifier);
+assert.equal(tok.status, 200);
+const { access_token } = await tok.json();
+assert.equal((await (await exchange(back.searchParams.get('code'), verifier)).json()).error, 'invalid_grant'); // single use
+const oc = new Client({ name: 'oauth', version: '1' });
+await oc.connect(new StreamableHTTPClientTransport(new URL(`${SITE}/mcp`), { requestInit: { headers: { Authorization: `Bearer ${access_token}` } } }));
+assert.match(txt(await call(oc, 'search_pages', { query: 'Roadmap' })), /Roadmap/);
+await oc.close();
+assert.ok((await c.query(api.workspaces.agentTokens, A)).some((t) => t.name === 'ChatGPT (connected)'));
+step('OAuth: discovery, registration, consent redirect, PKCE, single-use codes, token works with MCP');
+
 // ---------- presence + removal ----------
 await c.mutation(api.presence.heartbeat, { ...B, clientId: 'bob-tab', pageId: roadmap });
 const pres = await c.query(api.presence.list, A);
