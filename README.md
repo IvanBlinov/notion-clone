@@ -37,7 +37,7 @@ npx convex run --prod workspaces:importWorkspace ...   # done for you by:
 node scripts/import-data.js --prod
 ```
 
-This reads `data/` (v1 or v2 format) and creates ownerless workspaces. The first account to sign up claims them.
+This reads `data/` (v1 or v2 format) and creates ownerless workspaces. The first account to sign up claims them. If you already signed up, claim them with `npx convex run --prod workspaces:claimImported '{"email":"you@example.com"}'`.
 
 ## Local development
 

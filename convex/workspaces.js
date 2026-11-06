@@ -259,3 +259,21 @@ export const importWorkspace = internalMutation({
     return id;
   },
 });
+
+// Give ownerless (imported) workspaces to an existing account, for imports done after sign-up:
+//   npx convex run --prod workspaces:claimImported '{"email":"you@example.com"}'
+export const claimImported = internalMutation({
+  args: { email: v.string() },
+  handler: async (ctx, { email }) => {
+    const user = await ctx.db.query('users').withIndex('by_email', (q) => q.eq('email', normEmail(email))).unique();
+    if (!user) throw new Error(`No account for ${email}`);
+    const claimed = [];
+    for (const w of await ctx.db.query('workspaces').collect()) {
+      if (w.ownerId) continue;
+      await ctx.db.patch(w._id, { ownerId: user._id });
+      await ctx.db.insert('members', { workspaceId: w._id, userId: user._id, role: 'owner', joinedAt: Date.now() });
+      claimed.push(w.name);
+    }
+    return claimed;
+  },
+});
