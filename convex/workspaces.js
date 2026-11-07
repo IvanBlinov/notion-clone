@@ -1,7 +1,7 @@
 import { v } from 'convex/values';
 import { query, mutation, action, internalMutation } from './_generated/server';
 import { internal } from './_generated/api';
-import { DAY, fail, normEmail, validEmail, publicUser, requireUser, requireMember, requireOwner, membership, createWorkspaceWithSeed, loadWorkspace } from './lib/util.js';
+import { DAY, fail, normEmail, validEmail, publicUser, requireUser, requireMember, requireOwner, membership, createWorkspaceWithSeed, loadWorkspace, inviteSignup } from './lib/util.js';
 import { sha256 } from './lib/sha256.js';
 
 const INVITE_DAYS = 7;
@@ -122,6 +122,7 @@ export const insertInvite = internalMutation({
   handler: async (ctx, { session, workspaceId, email, token }) => {
     const user = await requireUser(ctx, session);
     await requireOwner(ctx, workspaceId, user._id);
+    if (!inviteSignup()) fail(403, 'Sign-up is closed, so invite links are turned off. To invite someone, set SIGNUP to "invite" in the Convex dashboard (Settings → Environment Variables).');
     const e = normEmail(email);
     if (e && !validEmail(e)) fail(400, 'Invalid email');
     if (e) {
@@ -158,6 +159,7 @@ export const inviteInfo = query({
       .unique();
     const ws = inv && (await ctx.db.get(inv.workspaceId));
     if (!inv || !ws) return { valid: false, reason: 'This invite link is not valid.' };
+    if (!inviteSignup()) return { valid: false, reason: 'Sign-up is closed.' };
     const expired = inv.expiresAt < Date.now();
     const by = await ctx.db.get(inv.createdBy);
     return {

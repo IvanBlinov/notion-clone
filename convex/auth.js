@@ -1,14 +1,21 @@
 import { v } from 'convex/values';
 import { query, mutation, internalQuery, internalMutation } from './_generated/server';
-import { COLORS, DAY, fail, openSignup, publicUser, requireUser, createWorkspaceWithSeed } from './lib/util.js';
+import { COLORS, DAY, fail, openSignup, hasUsers, signupMode, inviteSignup, publicUser, requireUser, createWorkspaceWithSeed } from './lib/util.js';
 import { sha256 } from './lib/sha256.js';
 import { acceptInvite, validInvite } from './workspaces.js';
 
 const SESSION_DAYS = 30;
+export const SIGNUP_CLOSED = 'Sign-up is closed.';
 
 export const status = query({
   args: {},
-  handler: async (ctx) => ({ hasUsers: !!(await ctx.db.query('users').first()), openSignup: await openSignup(ctx) }),
+  handler: async (ctx) => ({ hasUsers: await hasUsers(ctx), openSignup: await openSignup(ctx), inviteSignup: inviteSignup() }),
+});
+
+/** Cheap check before the expensive password hashing in authNode.signUp. */
+export const signupAllowed = internalQuery({
+  args: {},
+  handler: async (ctx) => !(await hasUsers(ctx)) || signupMode() !== 'closed',
 });
 
 /** Current user + their workspaces. */
@@ -78,14 +85,16 @@ export const createSession = internalMutation({
 export const createAccount = internalMutation({
   args: { name: v.string(), email: v.string(), salt: v.string(), passwordHash: v.string(), sessionHash: v.string(), inviteToken: v.optional(v.string()) },
   handler: async (ctx, a) => {
+    // the sign-up policy is checked first, so a closed site doesn't reveal which emails have accounts
+    const first = !(await hasUsers(ctx));
+    if (!first && signupMode() === 'closed') fail(403, SIGNUP_CLOSED);
+    const invite = a.inviteToken && !first ? await validInvite(ctx, a.inviteToken, a.email) : null;
+    if (!invite && !(await openSignup(ctx))) fail(403, 'Sign-up is by invitation only. Ask a workspace owner for an invite link.');
     const exists = await ctx.db
       .query('users')
       .withIndex('by_email', (q) => q.eq('email', a.email))
       .unique();
     if (exists) fail(409, 'An account with this email already exists — log in instead');
-    const invite = a.inviteToken ? await validInvite(ctx, a.inviteToken, a.email) : null;
-    const first = !(await ctx.db.query('users').first());
-    if (!invite && !(await openSignup(ctx))) fail(403, 'Sign-up is by invitation only. Ask a workspace owner for an invite link.');
     const count = (await ctx.db.query('users').take(1000)).length;
     const userId = await ctx.db.insert('users', {
       name: a.name,

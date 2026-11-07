@@ -41,7 +41,8 @@ const c = new ConvexHttpClient(URL_);
 const call = (client, name, args) => client.callTool({ name, arguments: args });
 
 // ---------- import + first user ----------
-assert.deepEqual(await c.query(api.auth.status, {}), { hasUsers: false, openSignup: true });
+try { cli('env', 'remove', 'SIGNUP'); } catch {}
+assert.deepEqual(await c.query(api.auth.status, {}), { hasUsers: false, openSignup: true, inviteSignup: false });
 const legacy = JSON.parse(cli('run', 'workspaces:importWorkspace', JSON.stringify({ name: 'Old', pages: { a1: { id: 'a1', title: 'Imported', icon: '', parentId: null, position: 0, blocks: [], favorite: false, archivedAt: null, createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z', version: 1 }, b2: { id: 'b2', title: 'Child', icon: '', parentId: 'a1', position: 0, blocks: [], favorite: false, archivedAt: null, createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z', version: 1 } } })));
 assert.equal((await errOf(c.action(api.authNode.signUp, { name: 'A', email: 'a@example.com', password: 'short' }))).status, 400);
 const alice = await c.action(api.authNode.signUp, { name: 'Alice', email: 'Alice@Example.com', password: 'correct horse' });
@@ -221,7 +222,17 @@ assert.match(txt(r), /Roadmap/);
 await stdio.close();
 step('stdio bridge talks to Convex');
 
-// ---------- invites & members ----------
+// ---------- closed sign-up (the default once an account exists) ----------
+try { cli('env', 'remove', 'SIGNUP'); } catch {}
+assert.deepEqual(await c.query(api.auth.status, {}), { hasUsers: true, openSignup: false, inviteSignup: false });
+const closedErr = await errOf(c.action(api.authNode.signUp, { name: 'X', email: 'alice@example.com', password: 'password123' }));
+assert.equal(closedErr.status, 403); // refused before revealing that the email exists
+assert.match(closedErr.message, /closed/);
+assert.equal((await errOf(c.action(api.workspaces.createInvite, { ...A, email: 'bob@example.com' }))).status, 403);
+step('sign-up closed: no accounts, no invite links, no account-exists leak');
+
+// ---------- invites & members (SIGNUP=invite) ----------
+cli('env', 'set', 'SIGNUP', 'invite');
 const inv = await c.action(api.workspaces.createInvite, { ...A, email: 'bob@example.com' });
 const infoInv = await c.query(api.workspaces.inviteInfo, { token: inv.token });
 assert.equal(infoInv.invitedBy, 'Alice');
@@ -304,4 +315,6 @@ await c.mutation(api.workspaces.removeMember, { ...A, userId: bobMe.user.id });
 assert.equal((await errOf(c.query(api.pages.tree, B))).status, 403);
 step('presence; owner removes a member');
 
+try { cli('env', 'remove', 'SIGNUP'); } catch {}
+assert.equal((await c.query(api.workspaces.inviteInfo, { token: inv.token })).valid, false);
 console.log('\nALL SMOKE TESTS PASSED');

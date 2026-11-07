@@ -2393,7 +2393,13 @@ async function openSettings(tab = 'members') {
         ),
       );
     };
-    if (owner) {
+    const signup = owner ? await query(cx.auth.status, {}).catch(() => ({ inviteSignup: true })) : null;
+    if (owner && !signup.inviteSignup) {
+      out.push(
+        h('h4', {}, 'Invite people'),
+        h('div', { class: 'hint' }, 'Sign-up is closed, so nobody can create an account, not even with an invite link. To invite someone later, set SIGNUP to "invite" in the Convex dashboard (Settings → Environment Variables).'),
+      );
+    } else if (owner) {
       const email = h('input', { class: 'field', type: 'email', placeholder: 'Email (optional — leave empty for a link anyone can use once)' });
       const result = h('div');
       const create = async () => {

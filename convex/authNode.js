@@ -13,6 +13,7 @@ const sha256 = (s) => crypto.createHash('sha256').update(s).digest('hex');
 export const signUp = action({
   args: { name: v.string(), email: v.string(), password: v.string(), inviteToken: v.optional(v.string()) },
   handler: async (ctx, a) => {
+    if (!(await ctx.runQuery(internal.auth.signupAllowed, {}))) fail(403, 'Sign-up is closed.');
     const name = a.name.trim().slice(0, 60);
     const email = normEmail(a.email);
     if (!name) fail(400, 'Please enter your name');

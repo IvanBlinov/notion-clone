@@ -134,7 +134,8 @@ route('/oauth/register', 'POST', async (ctx, request) => {
   }
   const name = String(body.client_name || 'MCP client').slice(0, 50);
   const clientId = randomToken('ncc_', 18);
-  await ctx.runMutation(internal.oauth.registerClient, { clientId, name, redirectUris: uris });
+  const reg = await ctx.runMutation(internal.oauth.registerClient, { clientId, name, redirectUris: uris });
+  if (reg?.error) return json(429, { error: 'temporarily_unavailable', error_description: reg.error });
   return json(201, {
     client_id: clientId,
     client_id_issued_at: Math.floor(Date.now() / 1000),

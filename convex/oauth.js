@@ -37,7 +37,12 @@ async function clientFor(ctx, clientId) {
 export const registerClient = internalMutation({
   args: { clientId: v.string(), name: v.string(), redirectUris: v.array(v.string()) },
   handler: async (ctx, a) => {
+    // registration is public (ChatGPT etc. register themselves) but gives no access by itself;
+    // cap it so nobody can flood the table
+    const recent = await ctx.db.query('oauthClients').order('desc').take(30);
+    if (recent.length === 30 && recent[29].createdAt > Date.now() - 3600_000) return { error: 'Too many app registrations; try again later.' };
     await ctx.db.insert('oauthClients', { ...a, createdAt: Date.now() });
+    return { ok: true };
   },
 });
 

@@ -13,7 +13,19 @@ export function fail(status, message, extra = {}) {
 export const normEmail = (e) => String(e || '').trim().toLowerCase();
 export const validEmail = (e) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e);
 export const publicUser = (u) => u && { id: u._id, name: u.name, email: u.email, color: u.color };
-export const openSignup = async (ctx) => process.env.OPEN_SIGNUP === 'true' || !(await ctx.db.query('users').first());
+/**
+ * Who may create an account, from the SIGNUP environment variable (only the deployment's
+ * owner can change it, in the Convex dashboard):
+ *   unset / "closed" — nobody (default); "invite" — people with an invite link; "open" — anyone.
+ * The very first account of a fresh deployment can always be created (it owns the workspace).
+ */
+export const signupMode = () => {
+  const m = String(process.env.SIGNUP || (process.env.OPEN_SIGNUP === 'true' ? 'open' : 'closed')).toLowerCase();
+  return ['open', 'invite'].includes(m) ? m : 'closed';
+};
+export const hasUsers = async (ctx) => !!(await ctx.db.query('users').first());
+export const openSignup = async (ctx) => signupMode() === 'open' || !(await hasUsers(ctx));
+export const inviteSignup = () => signupMode() !== 'closed';
 
 /** The logged-in user for a session token, or a 401. */
 export async function requireUser(ctx, session) {

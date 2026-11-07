@@ -62,7 +62,9 @@ export async function renderAuth({ inviteToken = null, connecting = false } = {}
               : ''
             : canSignup
               ? 'New here? <a href="#" data-mode="signup">Create an account</a>'
-              : '<span>Sign-up is by invitation only.</span>'
+              : status.inviteSignup
+                ? '<span>Sign-up is by invitation only.</span>'
+                : '<span>Sign-up is closed.</span>'
         }
       </div>`);
     el.querySelector('[data-mode]')?.addEventListener('click', (e) => {
