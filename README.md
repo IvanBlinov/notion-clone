@@ -86,10 +86,11 @@ For stdio-only clients (Claude Desktop) run the bridge from a checkout of this r
 | `query_database` | Filters (AND / OR, `me`, relative dates like `+7d`), sorts, text search, pagination, saved views |
 | `update_database_items` / `archive_database_items` | Bulk changes, reported per item |
 | `save_database_view` | Saved table and board (Kanban) views with filters, sorts, grouping and visible columns |
+| `create_linked_database_view` / `update_linked_database_view` | Show a database inside any page as a live, filtered table or board (e.g. each stage page shows only its tasks); same records, no copies |
 
 Every result is structured JSON (`structuredContent`) with ids and a `url` that opens the page in the app.
 
-In the app, type `/database` to add one (it starts with Status, Assignee and Due, and a board). Click a view tab for its options, a column header to rename, retype, sort or hide it, and **Filter** / **Sort** to change the view for everyone.
+In the app, type `/database` to add one, or `/linked` to show an existing database inside the current page (it starts with Status, Assignee and Due, and a board). Click a view tab for its options, a column header to rename, retype, sort or hide it, and **Filter** / **Sort** to change the view for everyone.
 
 ## Editor shortcuts
 
