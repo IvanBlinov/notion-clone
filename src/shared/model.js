@@ -110,6 +110,7 @@ export class WorkspaceModel {
         .filter((c) => !c.archivedAt)
         .map((c) => this.#summary(c)),
       archived: this.#isHidden(p),
+      linkedViews: p.blocks.filter((b) => b.type === 'database_view').map((b) => this.#linkedOut(b)),
     };
   }
   #blockIndex(p, blockId) {
@@ -246,7 +247,7 @@ export class WorkspaceModel {
       icon: String(icon || ''),
       parentId: parentId || null,
       position: 0,
-      blocks: (blocks ? blocks.map(sanitizeBlock) : markdownToBlocks(markdown)).filter((b) => b.type !== 'page'),
+      blocks: this.#linkBlocks(null, (blocks ? blocks.map(sanitizeBlock) : markdownToBlocks(markdown)).filter((b) => b.type !== 'page'), { refs: false }),
       favorite: false,
       archivedAt: null,
       createdAt: now(),
@@ -314,7 +315,7 @@ export class WorkspaceModel {
     if (icon !== undefined) p.icon = String(icon || '');
     let archived = [];
     if (Array.isArray(blocks)) {
-      const next = blocks.map(sanitizeBlock);
+      const next = this.#linkBlocks(p, blocks.map(sanitizeBlock));
       // page blocks the user deleted → move those sub-pages to the Trash
       const kept = new Set(next.filter((b) => b.type === 'page').map((b) => b.pageId));
       for (const b of p.blocks) {
@@ -397,6 +398,79 @@ export class WorkspaceModel {
   }
 
   // ---------- content ----------
+  /**
+   * Resolve linked database views in incoming blocks. A Markdown line
+   * "[Name](database_view:ID)" refers to an existing block of this page and keeps its
+   * settings (refs: true); unknown ones are dropped. Blocks that carry settings (editor
+   * saves, duplicates) are validated against their database.
+   */
+  #linkBlocks(p, blocks, { refs = true } = {}) {
+    const old = new Map((p?.blocks || []).filter((b) => b.type === 'database_view').map((b) => [b.id, b]));
+    const seen = new Set();
+    const out = [];
+    for (const b of blocks) {
+      if (b.type !== 'database_view') {
+        out.push(b);
+        continue;
+      }
+      if (b.ref) {
+        const o = refs ? old.get(b.ref) : null;
+        if (o && !seen.has(o.id)) out.push(o), seen.add(o.id);
+        continue;
+      }
+      if (!b.databaseId || seen.has(b.id)) continue;
+      const db = this.data.pages[b.databaseId];
+      if (db?.database) b.view = DB.linkedView(db.database, b.view || {});
+      seen.add(b.id);
+      out.push(b);
+    }
+    return out;
+  }
+  #linkedOut(b) {
+    const db = this.data.pages[b.databaseId];
+    if (!db?.database) return { blockId: b.id, databaseId: b.databaseId, available: false };
+    return { blockId: b.id, databaseId: db.id, databaseTitle: db.title, ...this.#viewOut(db, b.view || DB.linkedView(db.database, {})), id: undefined, viewId: b.view?.id };
+  }
+
+  /** Show a database inside another page: a live, filtered view of the same records. */
+  createLinkedView({ pageId, databaseId, afterBlockId = null, name, type, groupBy, filters, sorts, visibleProperties } = {}, actorArg) {
+    const actor = actorOf(actorArg);
+    const p = this.#page(pageId);
+    const db = this.#db(databaseId);
+    if (p.id === db.id) throw bad('A database already shows its own views; add a linked view to another page');
+    const view = DB.linkedView(db.database, { name: name || db.title || 'Linked view', type, groupBy, filters, sorts, visibleProperties }, { strict: true });
+    const block = { id: newId(), type: 'database_view', text: '', databaseId: db.id, view };
+    const at = afterBlockId ? this.#blockIndex(p, afterBlockId) + 1 : p.blocks.length;
+    p.blocks.splice(at, 0, block);
+    this.#contentChanged(p, actor);
+    return { pageId: p.id, version: p.version, ...this.#linkedOut(block) };
+  }
+
+  updateLinkedView({ pageId, blockId, name, type, groupBy, filters, sorts, visibleProperties } = {}, actorArg) {
+    const actor = actorOf(actorArg);
+    const p = this.#page(pageId);
+    const b = p.blocks[this.#blockIndex(p, blockId)];
+    if (b.type !== 'database_view') throw bad(`Block ${blockId} is not a linked database view`);
+    const db = this.#db(b.databaseId);
+    const cur = b.view || DB.linkedView(db.database, {});
+    const pick = (x, y) => (x === undefined ? y : x);
+    b.view = DB.linkedView(
+      db.database,
+      {
+        id: cur.id,
+        name: pick(name, cur.name),
+        type: pick(type, cur.type),
+        groupBy: pick(groupBy, cur.groupBy),
+        filters: pick(filters, cur.filters),
+        sorts: pick(sorts, cur.sorts),
+        visibleProperties: pick(visibleProperties, cur.visible),
+      },
+      { strict: true },
+    );
+    this.#contentChanged(p, actor);
+    return { pageId: p.id, version: p.version, ...this.#linkedOut(b) };
+  }
+
   #expectVersion(p, expected) {
     if (expected == null || expected === p.version) return;
     throw Object.assign(new Error(`Version conflict: you read version ${expected} of "${p.title || 'Untitled'}", but it is now at version ${p.version} (edited by ${p.lastEditedBy || 'someone'}). Read the page again and retry.`), { status: 409 });
@@ -411,7 +485,7 @@ export class WorkspaceModel {
     const actor = actorOf(actorArg);
     const p = this.#page(pageId);
     this.#expectVersion(p, expectedVersion);
-    p.blocks = markdownToBlocks(markdown);
+    p.blocks = this.#linkBlocks(p, markdownToBlocks(markdown));
     this.#contentChanged(p, actor);
     return this.#full(p);
   }
@@ -420,7 +494,7 @@ export class WorkspaceModel {
     const actor = actorOf(actorArg);
     const p = this.#page(pageId);
     this.#expectVersion(p, expectedVersion);
-    const blocks = markdownToBlocks(markdown).filter((b) => b.type !== 'page');
+    const blocks = this.#linkBlocks(p, markdownToBlocks(markdown).filter((b) => b.type !== 'page'), { refs: false });
     const at = afterBlockId ? this.#blockIndex(p, afterBlockId) + 1 : p.blocks.length;
     p.blocks.splice(at, 0, ...blocks);
     this.#contentChanged(p, actor);
@@ -440,11 +514,12 @@ export class WorkspaceModel {
     }
     let result;
     if (markdown !== undefined) {
-      const parsed = markdownToBlocks(markdown).filter((b) => b.type !== 'page');
+      const parsed = this.#linkBlocks(p, markdownToBlocks(markdown).filter((b) => b.type !== 'page'), { refs: false });
       if (parsed.length) parsed[0].id = blockId;
       p.blocks.splice(i, 1, ...parsed);
       result = parsed;
     } else {
+      if (p.blocks[i].type === 'database_view') throw bad('This block is a linked database view. Use update_linked_database_view to change it, or delete_blocks to remove it.');
       const b = { ...p.blocks[i] };
       if (type !== undefined) {
         if (!BLOCK_TYPES.includes(type) || type === 'page') throw bad(`Invalid block type "${type}". Use convert_block_to_page to turn a block into a sub-page.`);
@@ -501,7 +576,7 @@ export class WorkspaceModel {
     const i = this.#blockIndex(p, blockId);
     const b = p.blocks[i];
     if (b.type === 'page') throw bad('That block is already a page');
-    if (b.type === 'divider') throw bad('A divider cannot become a page');
+    if (b.type === 'divider' || b.type === 'database_view') throw bad(`A ${b.type === 'divider' ? 'divider' : 'linked database view'} cannot become a page`);
     if (p.database) throw bad('Blocks of a database page cannot become pages; add rows with create_database_items');
     const child = {
       id: newId(),
@@ -719,6 +794,15 @@ export class WorkspaceModel {
       for (const r of this.#children(p.id)) if (r.props) delete r.props[prop.id];
       DB.forgetProperty(d, prop.id);
     }
+    if ((removeProperties || []).length || (updateProperties || []).some((u) => u.type !== undefined)) {
+      // linked views of this database on other pages drop references to removed properties
+      for (const page of Object.values(this.data.pages)) {
+        const linked = page.blocks.filter((b) => b.type === 'database_view' && b.databaseId === p.id);
+        if (!linked.length) continue;
+        for (const b of linked) b.view = DB.linkedView(d, b.view || {});
+        this.#touch(page, actor);
+      }
+    }
     this.#touch(p, actor);
     return this.#schemaOut(p);
   }
@@ -728,6 +812,8 @@ export class WorkspaceModel {
     const p = this.#db(pageId);
     return {
       id: p.id,
+      title: p.title,
+      icon: p.icon,
       version: p.version,
       database: p.database,
       members: this.members,

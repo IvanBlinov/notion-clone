@@ -41,6 +41,9 @@ owners, statuses, dates or numbers. Each item is also a page, so it can have Mar
 - query_database filters, sorts and paginates; update_database_items changes many items at once.
 - save_database_view stores table or board views (e.g. "My tasks", "Critical", a Kanban board grouped by Status).
 - Person values: member id, email, unambiguous name, or "me". Dates: YYYY-MM-DD, "today", "+7d".
+- create_linked_database_view shows a database inside any other page as a live, filtered table or board (e.g. only
+  this stage's tasks on a stage page). It uses the same records; new items added there get the filtered values.
+  In Markdown it appears as "[View name](database_view:BLOCK_ID)"; keep that line in replace_page_content to keep it.
 
 Every result includes ids and a url to open the page in the app; share urls with the user.
 Never guess ids: use list_pages, search_pages, get_database or query_database.
@@ -228,7 +231,8 @@ export function createMcpServer(api, opts = {}) {
         meta.database = { id: p.row.databaseId, title: p.row.databaseTitle };
         meta.properties = p.properties;
       }
-      if (p.kind === 'database') meta.database = { rowCount: p.rowCount, hint: 'Use get_database for the schema and query_database for items' };
+      if (p.linkedViews?.length) meta.linkedViews = p.linkedViews;
+      if (p.kind === 'database') meta.database ={ rowCount: p.rowCount, hint: 'Use get_database for the schema and query_database for items' };
       const body = format === 'blocks' ? blocksListing(p.blocks) : blocksToMarkdown(p.blocks) || '(empty)';
       return {
         content: [{ type: 'text', text: `${JSON.stringify(meta, null, 1)}\n\n---- content (${format || 'markdown'}) ----\n${body}` }],
@@ -640,6 +644,62 @@ export function createMcpServer(api, opts = {}) {
       for (const k of Object.keys(v)) if (v[k] === undefined) delete v[k];
       const r = await api.call('saveView', { pageId: database_id, viewId: view || null, remove: !!remove, index: position ?? null, ...v });
       return out({ saved: !remove, databaseId: database_id, ...(r.views ? r : { view: r }), url: await urlOf(database_id) });
+    },
+  );
+
+  tool(
+    'create_linked_database_view',
+    {
+      title: 'Show a database inside a page',
+      description:
+        'Embed a live view of a database in another page: a table or board with its own filters, sorts and columns, over the same records (no copies). Example: on each stage page, a table of that stage\'s tasks with filters [{"property":"Stage","operator":"equals","value":"01 · Business & Feasibility"}]. Items created from the view get the filtered values. Placed at the end of the page or right after after_block_id. Remove it with delete_blocks.',
+      inputSchema: {
+        parent_page_id: z.string().describe('Page to show the view on'),
+        database_id: dbId,
+        name: z.string().optional().describe('View title shown above it (default: database title)'),
+        view_type: z.enum(['table', 'board']).optional(),
+        group_by: viewSpec.group_by,
+        filters: filterSchema.optional(),
+        sorts: sortSchema.optional(),
+        visible_properties: viewSpec.visible_properties,
+        after_block_id: z.string().optional().describe('Insert right after this block of the page (ids from get_page format "blocks")'),
+      },
+    },
+    async ({ parent_page_id, database_id, name, view_type, group_by, filters, sorts, visible_properties, after_block_id }) => {
+      const r = await api.call('createLinkedView', {
+        pageId: parent_page_id,
+        databaseId: database_id,
+        afterBlockId: after_block_id || null,
+        name,
+        type: view_type,
+        groupBy: group_by,
+        filters,
+        sorts,
+        visibleProperties: visible_properties,
+      });
+      return out({ created: true, ...r, url: await urlOf(parent_page_id) });
+    },
+  );
+
+  tool(
+    'update_linked_database_view',
+    {
+      title: 'Change a linked database view',
+      description: 'Change the name, layout, grouping, filters, sorts or columns of a linked database view block (block ids from get_page → linkedViews). Only what you pass changes.',
+      inputSchema: {
+        page_id: pageId,
+        block_id: z.string(),
+        name: z.string().optional(),
+        view_type: z.enum(['table', 'board']).optional(),
+        group_by: viewSpec.group_by,
+        filters: filterSchema.optional(),
+        sorts: sortSchema.optional(),
+        visible_properties: viewSpec.visible_properties,
+      },
+    },
+    async ({ page_id, block_id, name, view_type, group_by, filters, sorts, visible_properties }) => {
+      const r = await api.call('updateLinkedView', { pageId: page_id, blockId: block_id, name, type: view_type, groupBy: group_by, filters, sorts, visibleProperties: visible_properties });
+      return out({ updated: true, ...r, url: await urlOf(page_id) });
     },
   );
 

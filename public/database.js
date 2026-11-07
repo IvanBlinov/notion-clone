@@ -195,10 +195,15 @@ function optionPicker(ctx, anchor, row, prop) {
 // ---------------------------------------------------------------------------
 // Database view (tabs, toolbar, table / board)
 // ---------------------------------------------------------------------------
-export function createDatabaseView(pageId, deps) {
+/**
+ * opts.linked: { view, onChange(view), onRemove() } — show the database inside another page
+ * with one view whose settings belong to that page's block, not to the database.
+ */
+export function createDatabaseView(pageId, deps, opts = {}) {
   const { h } = deps;
-  const el = h('div', { class: 'db' }, h('div', { class: 'db-loading' }, 'Loading…'));
-  let data = null;
+  let linked = opts.linked || null;
+  const el = h('div', { class: `db${linked ? ' linked' : ''}` }, h('div', { class: 'db-loading' }, 'Loading…'));
+  let data; // undefined while loading, null if the database is gone
   let search = '';
   let pending = false;
   let focusRow = null;
@@ -225,10 +230,21 @@ export function createDatabaseView(pageId, deps) {
       .rpc('updateRows', { updates: [prop.type === 'title' ? { itemId: row.id, title: value ?? '' } : { itemId: row.id, properties: { [prop.id]: value } }] })
       .then((r) => r?.failed && deps.toast(r.results[0].error))
       .catch((err) => deps.toast(err.message));
-  const saveView = (patch) => write('saveView', { viewId: currentView().id, ...patch });
+  const saveView = (patch) => {
+    if (!linked) return write('saveView', { viewId: currentView().id, ...patch });
+    // a linked view's settings are part of the page that shows it
+    const { visibleProperties, ...rest } = patch;
+    const next = { ...linked.view, ...rest, ...(visibleProperties !== undefined ? { visible: visibleProperties } : {}) };
+    if (next.type === 'board' && !next.groupBy) next.groupBy = (data.database.properties.find((p) => p.type === 'select') || data.database.properties.find((p) => GROUPABLE.includes(p.type)))?.id || null;
+    linked = { ...linked, view: next };
+    linked.onChange(next);
+    render();
+    return Promise.resolve(next);
+  };
   const updateDb = (patch) => write('updateDatabase', patch);
 
   function currentView() {
+    if (linked) return { filters: [], sorts: [], type: 'table', name: data.database.title, ...linked.view };
     const views = data.database.views;
     return views.find((v) => v.id === viewId) || views[0];
   }
@@ -263,6 +279,10 @@ export function createDatabaseView(pageId, deps) {
   }
 
   function render() {
+    if (data === undefined) {
+      el.replaceChildren(h('div', { class: 'db-loading' }, 'Loading…'));
+      return;
+    }
     if (!data) {
       el.replaceChildren(h('div', { class: 'db-loading' }, 'This database is not available.'));
       return;
@@ -282,7 +302,14 @@ export function createDatabaseView(pageId, deps) {
 
   // ---------- toolbar ----------
   function toolbar(view, count) {
-    const tabs = h(
+    const tabs = linked
+      ? h(
+          'div',
+          { class: 'db-tabs linked' },
+          h('button', { class: 'db-linked-title', title: 'View options', onclick: (e) => viewMenu(e.currentTarget, view) }, h('span', { class: 'db-tab-icon' }, view.type === 'board' ? '▥' : '▤'), view.name || data.database.title || 'Untitled'),
+          h('button', { class: 'db-linked-source', title: 'Open the database', onclick: () => deps.go(pageId) }, '↗ ', data.title || 'Database'),
+        )
+      : h(
       'div',
       { class: 'db-tabs' },
       data.database.views.map((v) =>
@@ -350,8 +377,10 @@ export function createDatabaseView(pageId, deps) {
       v.type === 'board' ? { icon: '▤', name: 'Show as table', run: () => saveView({ type: 'table' }) } : null,
       v.type === 'board' ? { icon: '⇶', name: 'Group by…', run: () => deps.menu(anchor, groupable.map((p) => ({ icon: TYPE_ICON[p.type], name: p.name + (p.id === v.groupBy ? '  ✓' : ''), run: () => saveView({ groupBy: p.id }) }))) } : null,
       { icon: '☷', name: 'Properties…', run: () => visibilityEditor(anchor, v) },
+      linked ? { icon: '↗', name: 'Open source database', run: () => deps.go(pageId) } : null,
       '-',
-      data.database.views.length > 1 ? { icon: '🗑', name: 'Delete view', danger: true, run: () => write('saveView', { viewId: v.id, remove: true }) } : null,
+      linked ? { icon: '🗑', name: 'Remove from this page', danger: true, run: () => linked.onRemove() } : null,
+      !linked && data.database.views.length > 1 ? { icon: '🗑', name: 'Delete view', danger: true, run: () => write('saveView', { viewId: v.id, remove: true }) } : null,
     ]);
   }
 
@@ -674,6 +703,12 @@ export function createDatabaseView(pageId, deps) {
     el,
     destroy() {
       unsub?.();
+    },
+    /** A linked view's settings changed elsewhere (another person, an agent). */
+    setLinkedView(view) {
+      if (!linked || JSON.stringify(view) === JSON.stringify(linked.view)) return;
+      linked = { ...linked, view };
+      if (data) render();
     },
   };
 }

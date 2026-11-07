@@ -561,7 +561,7 @@ window.addEventListener('beforeunload', (e) => {
 });
 
 /** Content-only fingerprint of a block (ignores key order / defaulted fields). */
-const canon = (b) => JSON.stringify([b.id, b.type, b.text || '', b.pageId || '', !!b.checked, b.indent || 0, b.icon || '', b.language || '', b.url || '']);
+const canon = (b) => JSON.stringify([b.id, b.type, b.text || '', b.pageId || '', !!b.checked, b.indent || 0, b.icon || '', b.language || '', b.url || '', b.databaseId || '', b.view || null]);
 const sameBlocks = (a, b) => a.length === b.length && a.every((x, i) => canon(x) === canon(b[i]));
 
 /** Merge a fresher server copy of the open page with local unsaved edits and re-render. */
@@ -830,6 +830,64 @@ const dbDeps = {
   me: () => state.me,
   avatar: (...a) => avatar(...a),
 };
+// Linked database views embedded in pages: one live component per block, reused across redraws.
+const linkedViews = new Map(); // block id -> { databaseId, inst }
+function linkedViewEl(b) {
+  let entry = linkedViews.get(b.id);
+  if (entry && entry.databaseId !== b.databaseId) {
+    entry.inst.destroy();
+    entry = null;
+  }
+  if (!entry) {
+    const inst = createDatabaseView(b.databaseId, dbDeps, {
+      linked: {
+        view: b.view || {},
+        onChange: (view) => {
+          const blk = getBlock(b.id);
+          if (!blk) return;
+          blk.view = view;
+          markDirty(blk.id);
+        },
+        onRemove: () => {
+          removeBlock(b.id);
+        },
+      },
+    });
+    entry = { databaseId: b.databaseId, inst };
+    linkedViews.set(b.id, entry);
+  } else entry.inst.setLinkedView(b.view || {});
+  return entry.inst.el;
+}
+// drop the live subscriptions of linked views that are no longer on screen
+setInterval(() => {
+  for (const [id, e] of linkedViews) {
+    if (!e.inst.el.isConnected) {
+      e.inst.destroy();
+      linkedViews.delete(id);
+    }
+  }
+}, 4000);
+
+async function addLinkedView(b) {
+  const dbs = [...state.flat.values()].filter((n) => n.kind === 'database' && n.id !== state.page.id);
+  const anchor = blockElById(b.id) || $('#page');
+  if (!dbs.length) return toast('No databases yet — type /database to create one');
+  menu(anchor, [
+    { label: 'Show which database?' },
+    ...dbs.map((n) => ({
+      icon: iconOf(n),
+      name: label(n),
+      run: () => {
+        const blk = getBlock(b.id);
+        if (!blk) return;
+        convertBlock(blk, 'database_view', { text: '', databaseId: n.id, view: { name: label(n), type: 'table', filters: [], sorts: [] } });
+        const nb = { id: newId(), type: 'paragraph', text: '' };
+        insertAfter(blk.id, nb);
+      },
+    })),
+  ]);
+}
+
 /** Redraw an item's property panel after a change from elsewhere (unless someone is typing in it). */
 function refreshRowPanel() {
   const panel = $('.row-panel');
@@ -964,6 +1022,11 @@ function blockEl(b) {
       body.tabIndex = 0;
       body.title = 'Open page (Enter) · Backspace moves it to Trash';
       body.append(h('span', { class: 'pl-icon' }, n ? iconOf(n) : '📄'), h('span', { class: 'pl-title' }, n ? label(n) : b.text || 'Untitled'));
+      break;
+    }
+    case 'database_view': {
+      body.tabIndex = 0;
+      body.append(linkedViewEl(b));
       break;
     }
     case 'image':
@@ -1596,6 +1659,7 @@ const SLASH_ITEMS = [
   { type: 'paragraph', name: 'Text', icon: 'Aa', desc: 'Just start writing with plain text.', keys: 'text paragraph plain' },
   { type: 'page', name: 'Page', icon: '📄', desc: 'Embed a sub-page inside this page.', keys: 'page subpage new' },
   { type: 'database', name: 'Database', icon: '🗃️', desc: 'Tasks, contacts… with table and board views.', keys: 'database table board kanban tasks' },
+  { type: 'linked_view', name: 'Linked view of database', icon: '⧉', desc: 'Show an existing database here, filtered.', keys: 'linked view database embed table board' },
   { type: 'to_do', name: 'To-do list', icon: '☑', desc: 'Track tasks with a to-do list.', keys: 'todo task checkbox check' },
   { type: 'heading_1', name: 'Heading 1', icon: 'H1', desc: 'Big section heading.', keys: 'h1 heading title' },
   { type: 'heading_2', name: 'Heading 2', icon: 'H2', desc: 'Medium section heading.', keys: 'h2 heading subtitle' },
@@ -1687,6 +1751,15 @@ async function chooseSlash(item) {
   const rest = text.slice(0, at) + text.slice(end);
   closeSlash();
   if (!b) return;
+  if (item.type === 'linked_view') {
+    setBlockText(b, rest.trim() ? rest : '');
+    let target = b;
+    if (rest.trim()) {
+      target = { id: newId(), type: 'paragraph', text: '' };
+      insertAfter(b.id, target);
+    }
+    return addLinkedView(target);
+  }
   if (item.type === 'database') {
     setBlockText(b, rest);
     await flushSave();
@@ -1853,8 +1926,20 @@ function iconPicker(anchor, onPick, allowRemove = false) {
   openPop(anchor, parts, { width: 336 });
 }
 
-const TURN_INTO = SLASH_ITEMS.filter((i) => !['page', 'database', 'image', 'divider'].includes(i.type));
+const TURN_INTO = SLASH_ITEMS.filter((i) => !['page', 'database', 'linked_view', 'image', 'divider'].includes(i.type));
 function blockMenu(anchor, b) {
+  if (b.type === 'database_view') {
+    return menu(anchor, [
+      { name: 'Open source database', icon: '↗', run: () => flushSave().then(() => go(b.databaseId)) },
+      {
+        name: 'Duplicate view',
+        icon: '⧉',
+        run: () => insertAfter(b.id, { ...structuredClone(b), id: newId(), view: { ...structuredClone(b.view || {}), id: undefined, name: `${b.view?.name || 'View'} (copy)` } }),
+      },
+      '-',
+      { name: 'Remove from page', icon: '🗑', danger: true, run: () => removeBlock(b.id) },
+    ]);
+  }
   if (b.type === 'page') {
     return menu(anchor, [
       { name: 'Open', icon: '↗', run: () => flushSave().then(() => go(b.pageId)) },

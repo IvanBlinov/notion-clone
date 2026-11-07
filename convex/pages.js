@@ -25,6 +25,8 @@ export const WRITE_METHODS = new Set([
   'updateRows',
   'archiveRows',
   'saveView',
+  'createLinkedView',
+  'updateLinkedView',
 ]);
 
 const base = { session: v.string(), workspaceId: v.id('workspaces') };

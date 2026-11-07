@@ -405,6 +405,33 @@ export function makeView(db, spec, existing = null) {
   return view;
 }
 
+/**
+ * Validate the settings of a linked view (a database_view block on another page).
+ * strict: throw on unknown properties (agent requests); otherwise silently drop references
+ * to properties that no longer exist (saves from the editor after a property was deleted).
+ */
+export function linkedView(db, v, { strict = false } = {}) {
+  const known = (id) => {
+    try {
+      resolveProp(db, id);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const prune = (fs) => (fs || []).filter((f) => (f?.or ? ((f.or = prune(f.or)), f.or.length) : f?.and ? ((f.and = prune(f.and)), f.and.length) : known(f?.property)));
+  const spec = {
+    name: v?.name ?? 'Linked view',
+    type: v?.type || 'table',
+    filters: strict ? v?.filters || [] : prune(structuredClone(v?.filters || [])),
+    sorts: strict ? v?.sorts || [] : (v?.sorts || []).filter((s) => known(typeof s === 'string' ? s : s?.property)),
+    groupBy: v?.groupBy && (strict || known(v.groupBy)) ? v.groupBy : null,
+    visibleProperties: v?.visible || v?.visibleProperties ? (strict ? v.visible || v.visibleProperties : (v.visible || v.visibleProperties).filter(known)) : null,
+  };
+  if (!strict && spec.type === 'board' && !spec.groupBy && !db.properties.some((p) => GROUPABLE.includes(p.type))) spec.type = 'table';
+  return makeView(db, spec, { id: v?.id || shortId(), name: '', type: 'table', filters: [], sorts: [], groupBy: null, visible: null });
+}
+
 /** Drop references to a removed property from every view. */
 export function forgetProperty(db, propId) {
   const strip = (fs) => fs.filter((f) => (f.or ? ((f.or = strip(f.or)), f.or.length) : f.and ? ((f.and = strip(f.and)), f.and.length) : f.property !== propId));

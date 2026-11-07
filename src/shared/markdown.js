@@ -15,13 +15,17 @@ export const BLOCK_TYPES = [
   'divider',
   'image',
   'page',
+  'database_view',
 ];
 
 /** Blocks that are not text-editable in the editor. */
-export const ATOMIC_TYPES = ['divider', 'page'];
+export const ATOMIC_TYPES = ['divider', 'page', 'database_view'];
 
 /** A sub-page reference, written in Markdown as `[Title](page:ID)` on its own line. */
 const PAGE_LINK = /^\[([^\]]*)\]\(page:([\w-]+)\)\s*$/;
+
+/** A linked database view, written `[View name](database_view:BLOCK_ID)`; its settings live on the block. */
+const DB_VIEW_LINK = /^\[([^\]]*)\]\(database_view:([\w-]+)\)\s*$/;
 
 export const LIST_TYPES = ['bulleted_list', 'numbered_list', 'to_do'];
 
@@ -52,7 +56,8 @@ function isBlockStart(line) {
     /^\s*\d+[.)]\s/.test(line) ||
     /^\s*([-*_])(\s*\1){2,}\s*$/.test(line) ||
     /^!\[[^\]]*\]\([^)]+\)\s*$/.test(line) ||
-    PAGE_LINK.test(line)
+    PAGE_LINK.test(line) ||
+    DB_VIEW_LINK.test(line)
   );
 }
 
@@ -91,6 +96,12 @@ export function markdownToBlocks(md) {
     }
     if ((m = line.match(PAGE_LINK))) {
       push({ type: 'page', pageId: m[2], text: m[1] });
+      i++;
+      continue;
+    }
+    if ((m = line.match(DB_VIEW_LINK))) {
+      // refers to an existing block by id; the page model restores its settings
+      push({ type: 'database_view', ref: m[2], text: m[1] });
       i++;
       continue;
     }
@@ -168,6 +179,8 @@ export function blockToMarkdown(b, number = 1) {
       return `![${text}](${b.url || ''})`;
     case 'page':
       return `[${text.replace(/[[\]\n]/g, '') || 'Untitled'}](page:${b.pageId})`;
+    case 'database_view':
+      return `[${String(b.view?.name || text || 'Linked view').replace(/[[\]\n]/g, '')}](database_view:${b.id})`;
     default:
       return text;
   }
@@ -213,5 +226,10 @@ export function sanitizeBlock(b) {
   if (type === 'callout') out.icon = String(b.icon || '💡');
   if (type === 'image') out.url = String(b.url || '');
   if (type === 'page') out.pageId = String(b.pageId || '');
+  if (type === 'database_view') {
+    out.databaseId = String(b.databaseId || '');
+    const view = b.view && typeof b.view === 'object' ? JSON.parse(JSON.stringify(b.view)) : null;
+    out.view = view && JSON.stringify(view).length < 20000 ? view : null;
+  }
   return out;
 }

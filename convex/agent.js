@@ -30,6 +30,8 @@ const AGENT_METHODS = new Set([
   'archiveRows',
   'queryDatabase',
   'saveView',
+  'createLinkedView',
+  'updateLinkedView',
 ]);
 
 async function tokenRecord(ctx, token) {

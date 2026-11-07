@@ -182,6 +182,23 @@ step('MCP rejects bad tokens');
   const list = await J('list_pages', { parent_id: project });
   assert.ok(list.pages.some((n) => n.id === DB && n.kind === 'database' && !n.children));
 
+  // linked view of the database inside the stage page
+  const stagePage = tree.results[1].id;
+  const lv = await J('create_linked_database_view', { parent_page_id: stagePage, database_id: DB, name: 'Stage 1 tasks', filters: [{ property: 'Stage', operator: 'equals', value: 'Stage 1' }], sorts: [{ property: 'Due' }] });
+  assert.equal(lv.name, 'Stage 1 tasks');
+  const badLv = await call(db, 'create_linked_database_view', { parent_page_id: stagePage, database_id: DB, filters: [{ property: 'Nope', value: 1 }] });
+  assert.equal(badLv.isError, true);
+  let sp = await J('get_page', { page_id: stagePage });
+  assert.equal(sp.linkedViews.length, 1);
+  assert.match(sp.content, new RegExp(`\\[Stage 1 tasks\\]\\(database_view:${lv.blockId}\\)`));
+  await J('replace_page_content', { page_id: stagePage, content: `# Intro\n\n${sp.content}`, expected_version: sp.version });
+  sp = await J('get_page', { page_id: stagePage });
+  assert.equal(sp.linkedViews[0].blockId, lv.blockId);
+  assert.equal(sp.linkedViews[0].filters[0].value, 'Stage 1');
+  const lvu = await J('update_linked_database_view', { page_id: stagePage, block_id: lv.blockId, view_type: 'board', group_by: 'State' });
+  assert.equal(lvu.type, 'board');
+  assert.equal(lvu.groupBy, 'State');
+
   const proj = await J('get_page', { page_id: project });
   await J('replace_page_content', { page_id: project, content: 'Hello', expected_version: proj.version });
   const stale = await call(db, 'replace_page_content', { page_id: project, content: 'Overwrite', expected_version: proj.version });
