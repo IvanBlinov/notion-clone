@@ -18,6 +18,13 @@ export const WRITE_METHODS = new Set([
   'deleteBlocks',
   'moveBlock',
   'blockToPage',
+  'createPages',
+  'createDatabase',
+  'updateDatabase',
+  'createRows',
+  'updateRows',
+  'archiveRows',
+  'saveView',
 ]);
 
 const base = { session: v.string(), workspaceId: v.id('workspaces') };
@@ -56,6 +63,20 @@ export const markdown = query({
   },
 });
 
+/** A database with all its rows (the browser applies views client-side). Null if gone. */
+export const rows = query({
+  args: { ...base, pageId: v.string() },
+  handler: async (ctx, { session, workspaceId, pageId }) => {
+    const { model } = await open(ctx, session, workspaceId);
+    if (!model.hasPage(pageId)) return null;
+    try {
+      return model.databaseRows({ pageId });
+    } catch {
+      return null;
+    }
+  },
+});
+
 export const search = query({
   args: { ...base, query: v.string(), limit: v.optional(v.number()) },
   handler: async (ctx, { session, workspaceId, query: q, limit }) => (await open(ctx, session, workspaceId)).model.search({ query: q, limit: limit || 20 }),
@@ -67,7 +88,7 @@ export const run = mutation({
   handler: async (ctx, { session, workspaceId, method, args, clientId }) => {
     if (!WRITE_METHODS.has(method)) fail(400, `Unknown method ${method}`);
     const { user, model, commit } = await open(ctx, session, workspaceId);
-    const actor = { client: clientId || 'web', kind: 'user', name: user.name };
+    const actor = { client: clientId || 'web', kind: 'user', name: user.name, userId: user._id };
     const result = runModel(() => model[method](args || {}, actor));
     await commit();
     return result ?? null;

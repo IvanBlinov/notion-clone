@@ -26,7 +26,7 @@ const SITE = env.CONVEX_SITE_URL;
 const cli = (...args) => execFileSync(process.execPath, [path.join(root, 'node_modules', 'convex', 'bin', 'main.js'), ...args], { cwd: root, encoding: 'utf8' });
 const step = (s) => console.log('✓', s);
 const txt = (r) => r.content.map((c) => c.text).join('\n');
-const idOf = (s) => s.match(/id: (\w+)/)[1];
+const idOf = (s) => JSON.parse(s).id;
 const errOf = async (p) => {
   try {
     await p;
@@ -84,7 +84,7 @@ r = await call(mcp, 'update_page', { page_id: notes, parent_id: mvpPage });
 r = await call(mcp, 'get_page', { page_id: mvpPage, format: 'blocks' });
 const notesBlock = txt(r).match(/\[(\w+)\] \(page\)/)[1];
 r = await call(mcp, 'delete_blocks', { page_id: mvpPage, block_ids: [notesBlock] });
-assert.match(txt(r), /Moved 1 sub-page/);
+assert.equal(r.structuredContent.archivedPages.length, 1);
 r = await call(mcp, 'get_page', { page_id: 'missing' });
 assert.equal(r.isError, true);
 const info = await c.query(api.workspaces.info, A);
@@ -97,6 +97,104 @@ step('MCP over HTTP: page blocks, convert, move, trash; agent activity recorded'
 const bad = await fetch(`${SITE}/mcp`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer nca_wrong' }, body: '{}' });
 assert.equal(bad.status, 401);
 step('MCP rejects bad tokens');
+
+// ---------- databases over MCP ----------
+{
+  const db = new Client({ name: 'smoke-db', version: '1' });
+  await db.connect(new StreamableHTTPClientTransport(new URL(`${SITE}/mcp`), { requestInit: { headers: { Authorization: `Bearer ${token}` } } }));
+  const J = async (name, args) => {
+    const r = await call(db, name, args);
+    if (r.isError) throw new Error(`${name}: ${txt(r)}`);
+    assert.ok(r.structuredContent, `${name} returns structuredContent`);
+    return r.structuredContent;
+  };
+  const ctx = await J('get_context', {});
+  assert.equal(ctx.user.name, 'Alice');
+  assert.ok(ctx.members.some((m) => m.email === 'alice@example.com'));
+
+  const tree = await J('create_pages', { pages: [{ key: 'p', title: 'Big Pie Club', icon: '🍕' }, { key: 's1', parent_key: 'p', title: 'Licences' }, { parent_key: 'nope', title: 'Bad' }] });
+  assert.equal(tree.created, 2);
+  assert.equal(tree.failed, 1);
+  const project = tree.results[0].id;
+
+  const created = await J('create_database', {
+    title: 'Launch tasks',
+    parent_id: project,
+    icon: '✅',
+    properties: [
+      { name: 'Status', type: 'status', options: ['Not Started', 'In Progress', 'Blocked', 'Done'] },
+      { name: 'Priority', type: 'select', options: ['Low', 'Medium', 'High', 'Critical'] },
+      { name: 'Assignee', type: 'person' },
+      { name: 'Due', type: 'date' },
+      { name: 'Hours', type: 'number' },
+      { name: 'Stage', type: 'select' },
+    ],
+    views: [{ name: 'Board', type: 'board', group_by: 'Status' }],
+  });
+  const DB = created.id;
+  assert.deepEqual(created.views.map((v) => v.name), ['All', 'Board']);
+  assert.ok(created.url === null || created.url.includes(`#/${DB}`));
+
+  const items = Array.from({ length: 187 }, (_, i) => ({
+    properties: { Name: `Task ${i + 1}`, Status: ['Not Started', 'In Progress', 'Done'][i % 3], Priority: i % 10 ? 'High' : 'Critical', Assignee: i % 2 ? 'me' : 'alice@example.com', Due: `+${i % 40}d`, Hours: i % 8, Stage: `Stage ${(i % 14) + 1}` },
+    ...(i === 0 ? { content: '## Notes\n\nCall the city.' } : {}),
+  }));
+  const batch = await J('create_database_items', { database_id: DB, items, idempotency_key: 'big-pie-v1' });
+  assert.equal(batch.created, 187);
+  const again = await J('create_database_items', { database_id: DB, items, idempotency_key: 'big-pie-v1' });
+  assert.equal(again.replayed, true);
+  assert.equal((await J('get_database', { database_id: DB })).rowCount, 187);
+  assert.equal((await J('get_database', { database_id: DB })).properties.find((p) => p.name === 'Stage').options.length, 14);
+  const bad = await J('create_database_items', { database_id: DB, items: [{ properties: { Name: 'x', Assignee: 'Nobody' } }, { properties: { Name: 'ok' } }] });
+  assert.equal(bad.failed, 1);
+  assert.match(bad.results[0].error, /not a member/);
+
+  const q = await J('query_database', {
+    database_id: DB,
+    filters: [{ property: 'Priority', operator: 'equals', value: 'Critical' }, { property: 'Status', operator: 'not_equals', value: 'Done' }],
+    sorts: [{ property: 'Due', direction: 'ascending' }],
+    limit: 5,
+  });
+  assert.ok(q.total > 5 && q.items.length === 5 && q.hasMore && q.nextCursor === '5');
+  assert.ok(q.items.every((it) => it.properties.Priority === 'Critical' && it.properties.Status !== 'Done'));
+  const page2 = await J('query_database', { database_id: DB, filters: [{ property: 'Priority', operator: 'equals', value: 'Critical' }, { property: 'Status', operator: 'not_equals', value: 'Done' }], limit: 5, cursor: '5' });
+  assert.ok(page2.items.length > 0);
+
+  const upd = await J('update_database_items', { updates: q.items.map((it) => ({ item_id: it.id, properties: { Status: 'Done' } })) });
+  assert.equal(upd.updated, 5);
+  assert.equal((await J('query_database', { database_id: DB, filters: [{ property: 'Priority', operator: 'equals', value: 'Critical' }, { property: 'Status', operator: 'not_equals', value: 'Done' }] })).total, q.total - 5);
+
+  const view = await J('save_database_view', { database_id: DB, name: 'My critical', filters: [{ property: 'Assignee', operator: 'contains', value: 'me' }, { property: 'Priority', operator: 'equals', value: 'Critical' }], sorts: [{ property: 'Due' }] });
+  assert.equal(view.view.name, 'My critical');
+  const viaView = await J('query_database', { database_id: DB, view: 'My critical' });
+  assert.ok(viaView.items.every((it) => it.properties.Priority === 'Critical'));
+
+  await J('update_database', { database_id: DB, update_properties: [{ property: 'Status', name: 'State', rename_options: { Done: 'Complete' } }] });
+  const afterRename = await J('query_database', { database_id: DB, view: 'Board', limit: 1, filters: [{ property: 'State', operator: 'equals', value: 'Complete' }] });
+  assert.ok(afterRename.total > 0);
+
+  const first = (await J('query_database', { database_id: DB, search: 'Task 1', limit: 1, sorts: [{ property: 'Name' }] })).items[0];
+  const row = await J('get_page', { page_id: first.id });
+  assert.equal(row.kind, 'row');
+  assert.equal(row.database.id, DB);
+  assert.ok(row.properties.State);
+
+  const list = await J('list_pages', { parent_id: project });
+  assert.ok(list.pages.some((n) => n.id === DB && n.kind === 'database' && !n.children));
+
+  const proj = await J('get_page', { page_id: project });
+  await J('replace_page_content', { page_id: project, content: 'Hello', expected_version: proj.version });
+  const stale = await call(db, 'replace_page_content', { page_id: project, content: 'Overwrite', expected_version: proj.version });
+  assert.equal(stale.isError, true);
+  assert.match(txt(stale), /Version conflict/);
+  await db.close();
+
+  // the browser's view of the same database
+  const rows = await c.query(api.pages.rows, { ...A, pageId: DB });
+  assert.equal(rows.rows.length, 188);
+  assert.ok(rows.database.views.length === 3 && rows.members.length >= 1);
+}
+step('databases: 187 items in one call, idempotent retry, filters/sorts/pagination, bulk update, views, renames, version conflicts');
 
 // ---------- stdio bridge ----------
 const stdio = new Client({ name: 'smoke-stdio', version: '1' });

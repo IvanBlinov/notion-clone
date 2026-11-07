@@ -1,5 +1,6 @@
 import { markdownToBlocks, blocksToMarkdown, newId, LIST_TYPES, ATOMIC_TYPES } from './shared/markdown.js';
 import { cx, query, mutation, action, watch, session, mcpUrl, siteUrl, inviteUrl } from './backend.js';
+import { createDatabaseView, rowPropertiesPanel } from './database.js';
 
 // =====================================================================
 // API (Convex)
@@ -47,7 +48,7 @@ const h = (tag, attrs = {}, ...children) => {
 const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 const escAttr = (s) => esc(s).replace(/"/g, '&quot;');
 const label = (p) => p?.title || 'Untitled';
-const iconOf = (p) => p?.icon || '📄';
+const iconOf = (p) => p?.icon || (p?.kind === 'database' ? '🗃️' : '📄');
 const debounce = (fn, ms) => {
   let t;
   return (...a) => {
@@ -300,7 +301,9 @@ function treeNode(n, depth, isFav = false) {
       dataset: { id: n.id },
       onclick: () => go(n.id),
     },
-    h(
+    n.kind === 'database'
+      ? h('span', { class: 'tree-toggle placeholder' })
+      : h(
       'button',
       {
         class: `tree-toggle${open ? ' open' : ''}`,
@@ -321,12 +324,12 @@ function treeNode(n, depth, isFav = false) {
       'span',
       { class: 'tree-actions' },
       h('button', { class: 'icon-btn small', title: 'More', onclick: (e) => (e.stopPropagation(), pageMenu(e.currentTarget, n.id)) }, '⋯'),
-      isFav ? null : h('button', { class: 'icon-btn small', title: 'Add a page inside', onclick: (e) => (e.stopPropagation(), newPage(n.id)) }, '＋'),
+      isFav || n.kind === 'database' ? null : h('button', { class: 'icon-btn small', title: 'Add a page inside', onclick: (e) => (e.stopPropagation(), newPage(n.id)) }, '＋'),
     ),
   );
   if (!isFav) attachTreeDnD(row, n);
   const node = h('div', { class: 'tree-node' }, row);
-  if (open) {
+  if (open && n.kind !== 'database') {
     if (n.children.length) node.append(...n.children.map((c) => treeNode(c, depth + 1)));
     else node.append(h('div', { class: 'tree-empty', style: `padding-left:${depth * 14 + 34}px` }, 'No pages inside'));
   }
@@ -410,7 +413,7 @@ function go(id) {
   if (currentRouteId() === id) return;
   location.hash = '/' + id;
 }
-window.addEventListener('hashchange', () => openPage(currentRouteId()));
+window.addEventListener('hashchange', () => WS_ID && openPage(currentRouteId()));
 
 async function openPage(id, { focusBlockId } = {}) {
   closePop();
@@ -616,6 +619,7 @@ function patchBlocks(ids) {
 // =====================================================================
 function renderEmpty(msg) {
   document.title = 'Workspace';
+  $('#page').classList.remove('wide');
   $('#breadcrumb').replaceChildren();
   $('#edited-label').textContent = '';
   $('#btn-fav').hidden = $('#btn-page-menu').hidden = true;
@@ -696,6 +700,7 @@ function renderPage() {
   if (!p.blocks.length) p.blocks.push({ id: newId(), type: 'paragraph', text: '' });
   renderTop();
   const root = $('#page');
+  root.classList.toggle('wide', p.kind === 'database');
   root.replaceChildren();
 
   if (p.archived) {
@@ -793,9 +798,43 @@ function renderPage() {
     },
   });
   const sub = h('div', { class: 'subpages' });
-  root.append(iconWrap, title, blocksEl, sub, below);
+  const rowPanel = p.row ? h('div', { class: 'row-panel' }, rowPropertiesPanel(p, dbDeps)) : null;
+  if (p.kind === 'database') {
+    if (!dbView || dbView.pageId !== p.id) {
+      dbView?.destroy();
+      dbView = { pageId: p.id, ...createDatabaseView(p.id, dbDeps) };
+    }
+  } else if (dbView) {
+    dbView.destroy();
+    dbView = null;
+  }
+  root.append(...[iconWrap, title, rowPanel, blocksEl, dbView?.el, sub, below].filter(Boolean));
   renderBlocks();
   renderSubpages();
+}
+
+// ---------- databases ----------
+let dbView = null; // { pageId, el, destroy } for the open database page
+const dbDeps = {
+  h,
+  rpc,
+  go: (id) => flushSave().then(() => go(id)),
+  toast,
+  openPop: (...a) => openPop(...a),
+  closePop: () => closePop(),
+  menu: (...a) => menu(...a),
+  askInput: (...a) => askInput(...a),
+  watch,
+  cx,
+  ws: () => ws(),
+  me: () => state.me,
+  avatar: (...a) => avatar(...a),
+};
+/** Redraw an item's property panel after a change from elsewhere (unless someone is typing in it). */
+function refreshRowPanel() {
+  const panel = $('.row-panel');
+  if (!panel || !state.page?.row || panel.contains(document.activeElement)) return;
+  panel.replaceChildren(rowPropertiesPanel(state.page, dbDeps));
 }
 
 // Sub-pages are shown as page blocks inside the content; this just keeps their titles fresh.
@@ -1556,6 +1595,7 @@ function wireBlockDnD(wrap) {
 const SLASH_ITEMS = [
   { type: 'paragraph', name: 'Text', icon: 'Aa', desc: 'Just start writing with plain text.', keys: 'text paragraph plain' },
   { type: 'page', name: 'Page', icon: '📄', desc: 'Embed a sub-page inside this page.', keys: 'page subpage new' },
+  { type: 'database', name: 'Database', icon: '🗃️', desc: 'Tasks, contacts… with table and board views.', keys: 'database table board kanban tasks' },
   { type: 'to_do', name: 'To-do list', icon: '☑', desc: 'Track tasks with a to-do list.', keys: 'todo task checkbox check' },
   { type: 'heading_1', name: 'Heading 1', icon: 'H1', desc: 'Big section heading.', keys: 'h1 heading title' },
   { type: 'heading_2', name: 'Heading 2', icon: 'H2', desc: 'Medium section heading.', keys: 'h2 heading subtitle' },
@@ -1647,6 +1687,28 @@ async function chooseSlash(item) {
   const rest = text.slice(0, at) + text.slice(end);
   closeSlash();
   if (!b) return;
+  if (item.type === 'database') {
+    setBlockText(b, rest);
+    await flushSave();
+    try {
+      const db = await rpc('createDatabase', {
+        title: '',
+        parentId: state.page.id,
+        afterBlockId: b.id,
+        properties: [
+          { name: 'Status', type: 'select', options: ['Not started', 'In progress', 'Done'] },
+          { name: 'Assignee', type: 'person' },
+          { name: 'Due', type: 'date' },
+        ],
+        views: [{ name: 'Board', type: 'board', groupBy: 'Status' }],
+      });
+      await loadTree();
+      go(db.id);
+    } catch (err) {
+      toast(err.message);
+    }
+    return;
+  }
   if (item.type === 'page') {
     // The sub-page appears as a page block right here (replacing an empty line).
     setBlockText(b, rest.trim() ? rest : '');
@@ -1791,7 +1853,7 @@ function iconPicker(anchor, onPick, allowRemove = false) {
   openPop(anchor, parts, { width: 336 });
 }
 
-const TURN_INTO = SLASH_ITEMS.filter((i) => !['page', 'image', 'divider'].includes(i.type));
+const TURN_INTO = SLASH_ITEMS.filter((i) => !['page', 'database', 'image', 'divider'].includes(i.type));
 function blockMenu(anchor, b) {
   if (b.type === 'page') {
     return menu(anchor, [
@@ -2461,7 +2523,7 @@ async function onPageUpdate(pageId, fresh) {
   if (fresh.version <= state.page.version) {
     // only the surroundings changed (breadcrumb titles, trash state, sub-page titles)
     const archivedChanged = !!fresh.archived !== !!state.page.archived;
-    Object.assign(state.page, { breadcrumb: fresh.breadcrumb, children: fresh.children, archived: fresh.archived });
+    Object.assign(state.page, { breadcrumb: fresh.breadcrumb, children: fresh.children, archived: fresh.archived, row: fresh.row, properties: fresh.properties });
     if (archivedChanged) rerenderPreservingFocus([]);
     else renderTop();
     return;
@@ -2469,6 +2531,7 @@ async function onPageUpdate(pageId, fresh) {
   const byAgent = fresh.lastEditedBy === 'agent';
   const byOther = byAgent || fresh.lastEditedBy !== state.me?.name;
   applyServerPage(fresh);
+  refreshRowPanel();
   if (byAgent) toast('🤖 Agent updated this page', 'agent');
   else if (byOther && !dirty.any) setEditedLabel();
 }

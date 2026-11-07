@@ -89,6 +89,10 @@ export default defineSchema({
     createdBy: v.optional(v.string()),
     lastEditedBy: v.optional(v.string()),
     version: v.number(),
+    // set on database pages: { titleName, properties, views, idem }
+    database: v.optional(v.any()),
+    // set on database rows: { [propertyId]: value }
+    props: v.optional(v.any()),
   })
     .index('by_workspace', ['workspaceId'])
     .index('by_workspace_pid', ['workspaceId', 'pid']),

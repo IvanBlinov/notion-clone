@@ -33,7 +33,7 @@ const siteUrl =
 fs.rmSync(dist, { recursive: true, force: true });
 fs.cpSync(path.join(root, 'public'), dist, { recursive: true });
 fs.mkdirSync(path.join(dist, 'shared'), { recursive: true });
-fs.copyFileSync(path.join(root, 'src', 'shared', 'markdown.js'), path.join(dist, 'shared', 'markdown.js'));
+for (const f of ['markdown.js', 'database.js']) fs.copyFileSync(path.join(root, 'src', 'shared', f), path.join(dist, 'shared', f));
 fs.mkdirSync(path.join(dist, 'vendor'), { recursive: true });
 fs.copyFileSync(path.join(root, 'node_modules', 'convex', 'dist', 'browser.bundle.js'), path.join(dist, 'vendor', 'convex.js'));
 fs.writeFileSync(path.join(dist, 'config.js'), `window.NOTION_CONFIG = ${JSON.stringify({ convexUrl, siteUrl })};\n`);

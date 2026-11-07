@@ -67,7 +67,7 @@ export async function loadWorkspace(ctx, workspaceId) {
     rowId.set(pid, _id);
     before.set(pid, JSON.stringify(pages[pid]));
   }
-  const model = new WorkspaceModel(pages);
+  const model = new WorkspaceModel(pages, await workspaceMembers(ctx, workspaceId));
   async function commit() {
     const now = model.data.pages;
     for (const [pid, p] of Object.entries(now)) {
@@ -81,6 +81,20 @@ export async function loadWorkspace(ctx, workspaceId) {
     for (const [pid, id] of rowId) if (!now[pid]) await ctx.db.delete(id);
   }
   return { model, commit };
+}
+
+/** Members of a workspace as person properties see them: [{ id, name, email, color, role }]. */
+export async function workspaceMembers(ctx, workspaceId) {
+  const rows = await ctx.db
+    .query('members')
+    .withIndex('by_workspace', (q) => q.eq('workspaceId', workspaceId))
+    .collect();
+  const out = [];
+  for (const m of rows) {
+    const u = await ctx.db.get(m.userId);
+    if (u) out.push({ id: u._id, name: u.name, email: u.email, color: u.color, role: m.role });
+  }
+  return out;
 }
 
 /** Run a model operation, turning its errors into client-readable ones. */

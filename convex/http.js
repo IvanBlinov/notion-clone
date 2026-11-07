@@ -62,7 +62,7 @@ async function authed(ctx, request) {
 route('/mcp', 'POST', async (ctx, request) => {
   const token = await authed(ctx, request);
   if (!token) return unauthorized();
-  const server = createMcpServer(agentApi(ctx, token));
+  const server = createMcpServer(agentApi(ctx, token), { webUrl: process.env.WEB_URL || null });
   const transport = new WebStandardStreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
   await server.connect(transport);
   try {

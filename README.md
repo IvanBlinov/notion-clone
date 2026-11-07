@@ -72,14 +72,24 @@ For stdio-only clients (Claude Desktop) run the bridge from a checkout of this r
 
 | Tool | What it does |
 |---|---|
-| `list_pages` / `search_pages` | Page tree with ids / full-text search |
-| `get_page` | Read as Markdown, or as blocks with ids (`format: "blocks"`) |
-| `create_page` | New page; with `parent_id` (+ `after_block_id`) it appears as a page block there |
+| `get_context` | The user, workspace, members (ids / emails for assigning) and permissions |
+| `list_pages` / `search_pages` | Page tree (optionally below a page, limited depth) / full-text search scoped to a page or kind |
+| `get_page` | Read as Markdown or blocks with ids; includes url, version and, for database items, their properties |
+| `create_page` / `create_pages` | One page, or up to 100 in one call (build a whole tree with `key` / `parent_key`) |
 | `convert_block_to_page` | Turn a block (e.g. a list item) into a sub-page |
 | `update_page` | Rename, change the icon, move (`parent_id` / `"root"`), reorder (`index`) |
-| `replace_page_content` / `append_content` | Write Markdown (sub-pages you leave out are kept) |
+| `replace_page_content` / `append_content` | Write Markdown; `expected_version` refuses to overwrite newer edits |
 | `update_block` / `delete_blocks` / `move_block` | Precise block edits (deleting a sub-page block trashes that page) |
 | `archive_page` / `restore_page` | Trash and restore. Agents can't delete pages permanently |
+| `create_database` / `get_database` / `update_database` | Databases with typed properties: text, number, checkbox, select / status, multi-select, date, person, URL, email |
+| `create_database_items` | Up to 300 items per call, with `idempotency_key` so retries never duplicate; per-item results |
+| `query_database` | Filters (AND / OR, `me`, relative dates like `+7d`), sorts, text search, pagination, saved views |
+| `update_database_items` / `archive_database_items` | Bulk changes, reported per item |
+| `save_database_view` | Saved table and board (Kanban) views with filters, sorts, grouping and visible columns |
+
+Every result is structured JSON (`structuredContent`) with ids and a `url` that opens the page in the app.
+
+In the app, type `/database` to add one (it starts with Status, Assignee and Due, and a board). Click a view tab for its options, a column header to rename, retype, sort or hide it, and **Filter** / **Sort** to change the view for everyone.
 
 ## Editor shortcuts
 
