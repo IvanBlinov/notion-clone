@@ -30,8 +30,9 @@ export default defineSchema({
     .index('by_user', ['userId'])
     .index('by_workspace_user', ['workspaceId', 'userId']),
 
+  // workspaceId null = a platform invite: create an account (with its own workspace), join nothing
   invites: defineTable({
-    workspaceId: v.id('workspaces'),
+    workspaceId: v.union(v.id('workspaces'), v.null()),
     token: v.string(),
     email: v.union(v.string(), v.null()),
     createdBy: v.id('users'),

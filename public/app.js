@@ -2347,6 +2347,7 @@ async function openSettings(tab = 'members') {
     ['members', '👥 Members'],
     ['agent', '🤖 AI agent'],
     ['workspace', '⚙ Workspace'],
+    ...(state.admin ? [['signups', '✉ Sign-up invites']] : []),
   ];
   const nav = h('div', { class: 'tabs' });
   const body = h('div', { class: 'modal-text settings-body' });
@@ -2355,7 +2356,7 @@ async function openSettings(tab = 'members') {
     nav.replaceChildren(...tabs.map(([k, t]) => h('button', { class: `tab${k === tab ? ' on' : ''}`, onclick: () => show(k) }, t)));
     body.replaceChildren(h('div', { class: 'empty-note' }, 'Loading…'));
     try {
-      body.replaceChildren(...(await { members: membersTab, agent: agentTab, workspace: workspaceTab }[tab]()));
+      body.replaceChildren(...(await { members: membersTab, agent: agentTab, workspace: workspaceTab, signups: signupsTab }[tab]()));
     } catch (err) {
       body.replaceChildren(h('div', { class: 'empty-note' }, err.message));
     }
@@ -2394,12 +2395,7 @@ async function openSettings(tab = 'members') {
       );
     };
     const signup = owner ? await query(cx.auth.status, {}).catch(() => ({ inviteSignup: true })) : null;
-    if (owner && !signup.inviteSignup) {
-      out.push(
-        h('h4', {}, 'Invite people'),
-        h('div', { class: 'hint' }, 'Sign-up is closed, so nobody can create an account, not even with an invite link. To invite someone later, set SIGNUP to "invite" in the Convex dashboard (Settings → Environment Variables).'),
-      );
-    } else if (owner) {
+    if (owner) {
       const email = h('input', { class: 'field', type: 'email', placeholder: 'Email (optional — leave empty for a link anyone can use once)' });
       const result = h('div');
       const create = async () => {
@@ -2415,7 +2411,18 @@ async function openSettings(tab = 'members') {
         }
       };
       email.addEventListener('keydown', (e) => e.key === 'Enter' && create());
-      out.push(h('h4', {}, 'Invite people'), h('div', { class: 'row' }, email, h('button', { class: 'btn primary', onclick: create }, 'Create invite link')), result);
+      out.push(h('h4', {}, `Invite people to ${w.name}`), h('div', { class: 'row' }, email, h('button', { class: 'btn primary', onclick: create }, 'Create invite link')), result);
+      if (!signup.inviteSignup) {
+        out.push(
+          h(
+            'div',
+            { class: 'hint' },
+            state.admin
+              ? 'Sign-up is closed: a new person can only create an account with an invite sent to their email. To let someone sign up without joining this workspace, use the Sign-up invites tab.'
+              : 'Sign-up is closed: only people who already have an account can join with an invite.',
+          ),
+        );
+      }
       if (['localhost', '127.0.0.1'].includes(location.hostname)) {
         out.push(h('div', { class: 'warn' }, '⚠ You are on a local copy of the app — invite links point to localhost. Create invites from the deployed site so teammates can open them.'));
       }
@@ -2454,6 +2461,63 @@ async function openSettings(tab = 'members') {
     } else {
       out.push(h('div', { class: 'hint' }, 'Only the workspace owner can invite or remove people.'));
     }
+    return out;
+  }
+
+  // ---- sign-up invites (site admin): an account on this site, without joining a workspace ----
+  async function signupsTab() {
+    const pending = h('div');
+    const refresh = async () => {
+      const { invites } = await query(cx.workspaces.platformInvites, { session: S.session });
+      pending.replaceChildren(
+        ...(invites.length ? [h('h4', {}, 'Pending sign-up invites')] : []),
+        ...invites.map((inv) =>
+          h(
+            'div',
+            { class: 'member' },
+            h('span', { class: 'avatar ghost' }, '✉'),
+            h('div', { class: 'grow' }, h('div', {}, inv.email), h('div', { class: 'sub' }, `Expires ${new Date(inv.expiresAt).toLocaleDateString()}`)),
+            h('button', { class: 'btn', onclick: () => copyText(inviteUrl(inv.token), 'Invite link copied') }, 'Copy link'),
+            h(
+              'button',
+              {
+                class: 'btn danger',
+                onclick: async () => {
+                  await mutation(cx.workspaces.revokeInvite, { session: S.session, inviteId: inv.id });
+                  refresh();
+                },
+              },
+              'Revoke',
+            ),
+          ),
+        ),
+      );
+    };
+    const email = h('input', { class: 'field', type: 'email', placeholder: 'Their email' });
+    const result = h('div');
+    const create = async () => {
+      try {
+        const inv = await action(cx.workspaces.createPlatformInvite, { session: S.session, email: email.value.trim() });
+        const url = inviteUrl(inv.token);
+        result.replaceChildren(h('div', { class: 'hint' }, `Send this link to ${inv.email}. It works once, only for that email, and expires in 7 days.`), snippet(url));
+        copyText(url, 'Invite link copied');
+        email.value = '';
+        refresh();
+      } catch (err) {
+        toast(err.message);
+      }
+    };
+    email.addEventListener('keydown', (e) => e.key === 'Enter' && create());
+    const out = [
+      h('div', {}, 'Let someone create an account on this site. They get their own workspace and don’t see any of yours. You can invite them to a workspace later from the Members tab.'),
+      h('div', { class: 'row' }, email, h('button', { class: 'btn primary', onclick: create }, 'Create sign-up link')),
+      result,
+    ];
+    if (['localhost', '127.0.0.1'].includes(location.hostname)) {
+      out.push(h('div', { class: 'warn' }, '⚠ You are on a local copy of the app — invite links point to localhost. Create invites from the deployed site.'));
+    }
+    out.push(pending);
+    refresh();
     return out;
   }
 
@@ -2717,6 +2781,7 @@ addEventListener('hashchange', () => {
     return account.renderAcceptInvite(decodeURIComponent(invite[1]), me);
   }
   state.me = me.user;
+  state.admin = !!me.admin;
   state.workspaces = me.workspaces;
   if (!state.workspaces.length) state.workspaces = [await mutation(cx.workspaces.create, { session: session.get(), name: `${me.user.name}'s Workspace` })];
   const saved = localStorage.getItem('ws');

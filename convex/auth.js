@@ -1,6 +1,6 @@
 import { v } from 'convex/values';
 import { query, mutation, internalQuery, internalMutation } from './_generated/server';
-import { COLORS, DAY, fail, openSignup, hasUsers, signupMode, inviteSignup, publicUser, requireUser, createWorkspaceWithSeed } from './lib/util.js';
+import { COLORS, DAY, fail, openSignup, hasUsers, signupMode, inviteSignup, inviteAllowsSignup, isAdmin, publicUser, requireUser, createWorkspaceWithSeed } from './lib/util.js';
 import { sha256 } from './lib/sha256.js';
 import { acceptInvite, validInvite } from './workspaces.js';
 
@@ -14,8 +14,12 @@ export const status = query({
 
 /** Cheap check before the expensive password hashing in authNode.signUp. */
 export const signupAllowed = internalQuery({
-  args: {},
-  handler: async (ctx) => !(await hasUsers(ctx)) || signupMode() !== 'closed',
+  args: { inviteToken: v.optional(v.string()) },
+  handler: async (ctx, { inviteToken }) => {
+    if (!(await hasUsers(ctx)) || signupMode() !== 'closed') return true;
+    const inv = inviteToken && (await ctx.db.query('invites').withIndex('by_token', (q) => q.eq('token', inviteToken)).unique());
+    return !!inv && (await inviteAllowsSignup(ctx, inv));
+  },
 });
 
 /** Current user + their workspaces. */
@@ -33,7 +37,7 @@ export const me = query({
       if (w) workspaces.push({ id: w._id, name: w.name, role: m.role, createdAt: w.createdAt });
     }
     workspaces.sort((a, b) => a.createdAt - b.createdAt);
-    return { user: publicUser(user), workspaces };
+    return { user: publicUser(user), workspaces, admin: await isAdmin(ctx, user) };
   },
 });
 
@@ -87,9 +91,14 @@ export const createAccount = internalMutation({
   handler: async (ctx, a) => {
     // the sign-up policy is checked first, so a closed site doesn't reveal which emails have accounts
     const first = !(await hasUsers(ctx));
-    if (!first && signupMode() === 'closed') fail(403, SIGNUP_CLOSED);
+    if (!first && signupMode() === 'closed' && !a.inviteToken) fail(403, SIGNUP_CLOSED);
     const invite = a.inviteToken && !first ? await validInvite(ctx, a.inviteToken, a.email) : null;
-    if (!invite && !(await openSignup(ctx))) fail(403, 'Sign-up is by invitation only. Ask a workspace owner for an invite link.');
+    if (invite && !(await inviteAllowsSignup(ctx, invite))) fail(403, `${SIGNUP_CLOSED} This invite only works for people who already have an account — log in instead.`);
+    if (!invite && !(await openSignup(ctx))) fail(403, signupMode() === 'closed' ? SIGNUP_CLOSED : 'Sign-up is by invitation only. Ask a workspace owner for an invite link.');
+    if (invite && !invite.email) {
+      // links without an email could be forwarded; with sign-up closed only email-bound ones create accounts
+      if (signupMode() === 'closed') fail(403, `${SIGNUP_CLOSED} Ask for an invite sent to your email.`);
+    }
     const exists = await ctx.db
       .query('users')
       .withIndex('by_email', (q) => q.eq('email', a.email))
@@ -112,8 +121,11 @@ export const createAccount = internalMutation({
         await ctx.db.insert('members', { workspaceId: w._id, userId, role: 'owner', joinedAt: Date.now() });
       }
     }
-    if (invite) await acceptInvite(ctx, invite, userId);
-    else if (!(await ctx.db.query('members').withIndex('by_user', (q) => q.eq('userId', userId)).first())) {
+    if (invite?.workspaceId) await acceptInvite(ctx, invite, userId);
+    else if (invite) {
+      await ctx.db.patch(invite._id, { acceptedBy: userId });
+      await createWorkspaceWithSeed(ctx, userId, `${a.name}'s Workspace`);
+    } else if (!(await ctx.db.query('members').withIndex('by_user', (q) => q.eq('userId', userId)).first())) {
       await createWorkspaceWithSeed(ctx, userId, `${a.name}'s Workspace`);
     }
     await newSession(ctx, userId, a.sessionHash);

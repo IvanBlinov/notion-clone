@@ -228,8 +228,49 @@ assert.deepEqual(await c.query(api.auth.status, {}), { hasUsers: true, openSignu
 const closedErr = await errOf(c.action(api.authNode.signUp, { name: 'X', email: 'alice@example.com', password: 'password123' }));
 assert.equal(closedErr.status, 403); // refused before revealing that the email exists
 assert.match(closedErr.message, /closed/);
-assert.equal((await errOf(c.action(api.workspaces.createInvite, { ...A, email: 'bob@example.com' }))).status, 403);
-step('sign-up closed: no accounts, no invite links, no account-exists leak');
+assert.equal((await errOf(c.action(api.authNode.signUp, { name: 'X', email: 'x@example.com', password: 'password123', inviteToken: 'bogus' }))).status, 403);
+step('sign-up closed: no accounts without an invite, no account-exists leak');
+
+// ---------- sign-up invites from the site admin (work while sign-up is closed) ----------
+assert.equal(me.admin, true);
+assert.equal((await errOf(c.action(api.workspaces.createPlatformInvite, { session: alice.session, email: '' }))).status, 400);
+assert.equal((await errOf(c.action(api.workspaces.createPlatformInvite, { session: alice.session, email: 'alice@example.com' }))).status, 409);
+const pinv = await c.action(api.workspaces.createPlatformInvite, { session: alice.session, email: 'Carol@Example.com' });
+const pinfo = await c.query(api.workspaces.inviteInfo, { token: pinv.token });
+assert.equal(pinfo.valid, true);
+assert.equal(pinfo.workspace, null);
+assert.equal(pinfo.canSignUp, true);
+assert.equal(pinfo.email, 'carol@example.com');
+assert.deepEqual((await c.query(api.workspaces.platformInvites, { session: alice.session })).invites.map((i) => i.email), ['carol@example.com']);
+assert.equal((await errOf(c.action(api.authNode.signUp, { name: 'M', email: 'm@example.com', password: 'password123', inviteToken: pinv.token }))).status, 403);
+assert.equal((await errOf(c.mutation(api.workspaces.accept, { session: alice.session, token: pinv.token }))).status, 403); // for carol's email
+const carol = await c.action(api.authNode.signUp, { name: 'Carol', email: 'carol@example.com', password: 'password123', inviteToken: pinv.token });
+const carolMe = await c.query(api.auth.me, { session: carol.session });
+assert.equal(carolMe.workspaces.length, 1);
+assert.notEqual(carolMe.workspaces[0].id, ws.id);
+assert.equal(carolMe.workspaces[0].role, 'owner');
+assert.equal(carolMe.admin, false);
+assert.equal((await errOf(c.action(api.authNode.signUp, { name: 'C2', email: 'carol@example.com', password: 'password123', inviteToken: pinv.token }))).status, 410);
+assert.equal((await c.query(api.workspaces.platformInvites, { session: alice.session })).invites.length, 0);
+// a non-admin can't let new people in while sign-up is closed
+assert.equal((await errOf(c.action(api.workspaces.createPlatformInvite, { session: carol.session, email: 'dave@example.com' }))).status, 403);
+const C = { session: carol.session, workspaceId: carolMe.workspaces[0].id };
+const dinv = await c.action(api.workspaces.createInvite, { ...C, email: 'dave@example.com' });
+assert.equal((await c.query(api.workspaces.inviteInfo, { token: dinv.token })).canSignUp, false);
+assert.equal((await errOf(c.action(api.authNode.signUp, { name: 'Dave', email: 'dave@example.com', password: 'password123', inviteToken: dinv.token }))).status, 403);
+// ...but their workspace invites still work for people who already have an account
+const ainv = await c.action(api.workspaces.createInvite, { ...C, email: 'alice@example.com' });
+await c.mutation(api.workspaces.accept, { session: alice.session, token: ainv.token });
+assert.equal((await c.query(api.auth.me, { session: alice.session })).workspaces.length, 2);
+// an admin invite without an email can't create accounts while closed
+const open = await c.action(api.workspaces.createInvite, A);
+assert.equal((await errOf(c.action(api.authNode.signUp, { name: 'E', email: 'e@example.com', password: 'password123', inviteToken: open.token }))).status, 403);
+await c.mutation(api.workspaces.revokeInvite, { session: alice.session, inviteId: open.id });
+const rinv = await c.action(api.workspaces.createPlatformInvite, { session: alice.session, email: 'eve@example.com' });
+assert.equal((await errOf(c.mutation(api.workspaces.revokeInvite, { session: carol.session, inviteId: rinv.id }))).status, 403);
+await c.mutation(api.workspaces.revokeInvite, { session: alice.session, inviteId: rinv.id });
+assert.equal((await c.query(api.workspaces.inviteInfo, { token: rinv.token })).valid, false);
+step('sign-up invites: admin only, email-bound, single use, own workspace; closed sign-up still holds for others');
 
 // ---------- invites & members (SIGNUP=invite) ----------
 cli('env', 'set', 'SIGNUP', 'invite');
@@ -248,6 +289,7 @@ const B = { session: bob.session, workspaceId: ws.id };
 const bobPage = await c.mutation(api.pages.run, { ...B, method: 'createPage', args: { title: 'Bob page' } });
 assert.equal(bobPage.createdBy, 'Bob');
 assert.equal((await errOf(c.action(api.workspaces.createInvite, B))).status, 403);
+assert.equal((await errOf(c.action(api.workspaces.createPlatformInvite, { session: bob.session, email: 'z@example.com' }))).status, 403);
 const members = await c.query(api.workspaces.members, A);
 assert.deepEqual(members.members.map((m) => m.name).sort(), ['Alice', 'Bob']);
 step('email-bound invite, single use; members edit; only the owner invites');

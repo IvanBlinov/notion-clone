@@ -1,7 +1,7 @@
 import { v } from 'convex/values';
 import { query, mutation, action, internalMutation } from './_generated/server';
 import { internal } from './_generated/api';
-import { DAY, fail, normEmail, validEmail, publicUser, requireUser, requireMember, requireOwner, membership, createWorkspaceWithSeed, loadWorkspace, inviteSignup } from './lib/util.js';
+import { DAY, fail, normEmail, validEmail, publicUser, requireUser, requireMember, requireOwner, membership, createWorkspaceWithSeed, loadWorkspace, isAdmin, inviteAllowsSignup } from './lib/util.js';
 import { sha256 } from './lib/sha256.js';
 
 const INVITE_DAYS = 7;
@@ -122,7 +122,8 @@ export const insertInvite = internalMutation({
   handler: async (ctx, { session, workspaceId, email, token }) => {
     const user = await requireUser(ctx, session);
     await requireOwner(ctx, workspaceId, user._id);
-    if (!inviteSignup()) fail(403, 'Sign-up is closed, so invite links are turned off. To invite someone, set SIGNUP to "invite" in the Convex dashboard (Settings → Environment Variables).');
+    // While sign-up is closed, a workspace invite from a non-admin only works for people
+    // who already have an account (inviteAllowsSignup decides at sign-up time).
     const e = normEmail(email);
     if (e && !validEmail(e)) fail(400, 'Invalid email');
     if (e) {
@@ -138,13 +139,58 @@ export const insertInvite = internalMutation({
   },
 });
 
+// Platform invites (site admin only): let one person create an account on this site,
+// with their own workspace, without joining any of yours. Always bound to an email.
+export const platformInvites = query({
+  args: { session: v.string() },
+  handler: async (ctx, { session }) => {
+    const user = await requireUser(ctx, session);
+    if (!(await isAdmin(ctx, user))) return { admin: false, invites: [] };
+    const rows = await ctx.db
+      .query('invites')
+      .withIndex('by_workspace', (q) => q.eq('workspaceId', null))
+      .collect();
+    return {
+      admin: true,
+      invites: rows
+        .filter((i) => !i.acceptedBy && i.expiresAt > Date.now())
+        .sort((a, b) => b.createdAt - a.createdAt)
+        .map((i) => ({ id: i._id, token: i.token, email: i.email, expiresAt: i.expiresAt })),
+    };
+  },
+});
+
+export const createPlatformInvite = action({
+  args: { session: v.string(), email: v.string() },
+  handler: async (ctx, args) => ctx.runMutation(internal.workspaces.insertPlatformInvite, { ...args, token: randomToken() }),
+});
+
+export const insertPlatformInvite = internalMutation({
+  args: { session: v.string(), email: v.string(), token: v.string() },
+  handler: async (ctx, { session, email, token }) => {
+    const user = await requireUser(ctx, session);
+    if (!(await isAdmin(ctx, user))) fail(403, 'Only the site admin can invite people to sign up');
+    const e = normEmail(email);
+    if (!validEmail(e)) fail(400, 'Enter the email of the person you want to invite');
+    const existing = await ctx.db
+      .query('users')
+      .withIndex('by_email', (q) => q.eq('email', e))
+      .unique();
+    if (existing) fail(409, 'That person already has an account');
+    const expiresAt = Date.now() + INVITE_DAYS * DAY;
+    const id = await ctx.db.insert('invites', { workspaceId: null, token, email: e, createdBy: user._id, createdAt: Date.now(), expiresAt, acceptedBy: null });
+    return { id, token, email: e, expiresAt };
+  },
+});
+
 export const revokeInvite = mutation({
   args: { session: v.string(), inviteId: v.id('invites') },
   handler: async (ctx, { session, inviteId }) => {
     const user = await requireUser(ctx, session);
     const inv = await ctx.db.get(inviteId);
     if (!inv) fail(404, 'Invite not found');
-    await requireOwner(ctx, inv.workspaceId, user._id);
+    if (inv.workspaceId) await requireOwner(ctx, inv.workspaceId, user._id);
+    else if (!(await isAdmin(ctx, user))) fail(403, 'Only the site admin can do that');
     await ctx.db.delete(inviteId);
   },
 });
@@ -157,17 +203,19 @@ export const inviteInfo = query({
       .query('invites')
       .withIndex('by_token', (q) => q.eq('token', token))
       .unique();
-    const ws = inv && (await ctx.db.get(inv.workspaceId));
-    if (!inv || !ws) return { valid: false, reason: 'This invite link is not valid.' };
-    if (!inviteSignup()) return { valid: false, reason: 'Sign-up is closed.' };
+    const ws = inv?.workspaceId ? await ctx.db.get(inv.workspaceId) : null;
+    if (!inv || (inv.workspaceId && !ws)) return { valid: false, reason: 'This invite link is not valid.' };
+    const canSignUp = await inviteAllowsSignup(ctx, inv);
+    if (!ws && !canSignUp) return { valid: false, reason: 'Sign-up is closed.' };
     const expired = inv.expiresAt < Date.now();
     const by = await ctx.db.get(inv.createdBy);
     return {
       valid: !inv.acceptedBy && !expired,
       reason: inv.acceptedBy ? 'This invite link has already been used.' : expired ? 'This invite link has expired.' : null,
-      workspace: { id: ws._id, name: ws.name },
+      workspace: ws ? { id: ws._id, name: ws.name } : null,
       invitedBy: by?.name || 'Someone',
       email: inv.email,
+      canSignUp,
     };
   },
 });
@@ -177,14 +225,16 @@ export async function validInvite(ctx, token, email) {
     .query('invites')
     .withIndex('by_token', (q) => q.eq('token', token))
     .unique();
-  if (!inv || !(await ctx.db.get(inv.workspaceId))) fail(404, 'This invite link is not valid');
+  if (!inv || (inv.workspaceId && !(await ctx.db.get(inv.workspaceId)))) fail(404, 'This invite link is not valid');
   if (inv.acceptedBy) fail(410, 'This invite link has already been used');
   if (inv.expiresAt < Date.now()) fail(410, 'This invite link has expired');
   if (inv.email && email && inv.email !== normEmail(email)) fail(403, `This invite is for ${inv.email}`);
   return inv;
 }
 
+/** Joins the invite's workspace. Platform invites are only used at sign-up (see auth.createAccount). */
 export async function acceptInvite(ctx, inv, userId) {
+  if (!inv.workspaceId) fail(400, 'This invite is for creating an account, and you already have one.');
   if (await membership(ctx, inv.workspaceId, userId)) return inv.workspaceId; // already in; keep link usable
   await ctx.db.patch(inv._id, { acceptedBy: userId });
   await ctx.db.insert('members', { workspaceId: inv.workspaceId, userId, role: 'member', joinedAt: Date.now() });

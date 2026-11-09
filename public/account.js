@@ -29,7 +29,9 @@ async function inviteHeader(token) {
   }
   return {
     info,
-    html: `<div class="auth-invite"><b>${esc(info.invitedBy)}</b> invited you to join<div class="auth-ws">${esc(info.workspace.name)}</div></div>`,
+    html: info.workspace
+      ? `<div class="auth-invite"><b>${esc(info.invitedBy)}</b> invited you to join<div class="auth-ws">${esc(info.workspace.name)}</div></div>`
+      : `<div class="auth-invite"><b>${esc(info.invitedBy)}</b> invited you to create an account</div>`,
   };
 }
 
@@ -38,8 +40,10 @@ export async function renderAuth({ inviteToken = null, connecting = false } = {}
   const header = await inviteHeader(inviteToken);
   const { info } = header;
   const inviteHtml = header.html || (connecting ? '<div class="auth-invite">Log in to connect an app to your workspace.</div>' : '');
-  const canSignup = status.openSignup || !!info;
-  let mode = !status.hasUsers || (info && !info.email) ? 'signup' : info ? 'signup' : 'login';
+  const inviteSignup = !!info && info.canSignUp !== false && (!!info.email || status.inviteSignup);
+  const canSignup = status.openSignup || inviteSignup;
+  const join = !!info?.workspace;
+  let mode = !status.hasUsers || inviteSignup ? 'signup' : 'login';
 
   const render = () => {
     const signup = mode === 'signup';
@@ -52,7 +56,7 @@ export async function renderAuth({ inviteToken = null, connecting = false } = {}
         <label>Email<input name="email" type="email" autocomplete="email" required value="${esc(info?.email || '')}" ${info?.email ? 'readonly' : ''}></label>
         <label>Password<input name="password" type="password" autocomplete="${signup ? 'new-password' : 'current-password'}" minlength="${signup ? 8 : 1}" required></label>
         <div class="auth-error" hidden></div>
-        <button class="auth-btn" type="submit">${signup ? (info ? 'Create account & join' : 'Create account') : info ? 'Log in & join' : 'Log in'}</button>
+        <button class="auth-btn" type="submit">${signup ? (join ? 'Create account & join' : 'Create account') : join ? 'Log in & join' : 'Log in'}</button>
       </form>
       <div class="auth-switch">
         ${
@@ -82,10 +86,12 @@ export async function renderAuth({ inviteToken = null, connecting = false } = {}
       btn.disabled = true;
       errEl.hidden = true;
       try {
-        const args = { email: data.email, password: data.password, inviteToken: info ? inviteToken : undefined };
+        // a sign-up invite is only for creating an account, so don't send it when logging in
+        const args = { email: data.email, password: data.password, inviteToken: info && (signup || join) ? inviteToken : undefined };
         const r = signup ? await action(cx.authNode.signUp, { ...args, name: data.name }) : await action(cx.authNode.logIn, args);
         session.set(r.session);
-        if (info) localStorage.setItem('ws', info.workspace.id);
+        if (join) localStorage.setItem('ws', info.workspace.id);
+        else if (info) localStorage.removeItem('ws');
         goHome();
       } catch (err) {
         errEl.textContent = err.message;
@@ -100,11 +106,13 @@ export async function renderAuth({ inviteToken = null, connecting = false } = {}
 /** Logged-in user opening an invite link. */
 export async function renderAcceptInvite(token, me) {
   const { html, info } = await inviteHeader(token);
-  const already = info && me.workspaces.some((w) => w.id === info.workspace.id);
+  const already = info?.workspace && me.workspaces.some((w) => w.id === info.workspace.id);
   const el = shell(`
     ${html}
     ${
-      info
+      info && !info.workspace
+        ? `<p class="auth-sub">You're signed in as ${esc(me.user.email)}, so you already have an account. This link is for someone new.</p><button class="auth-btn" data-home>Go to my workspace</button>`
+        : info
         ? already
           ? `<p class="auth-sub">You're already a member of this workspace.</p><button class="auth-btn" data-go>Open workspace</button>`
           : `<p class="auth-sub">Signed in as ${esc(me.user.email)}</p><div class="auth-error" hidden></div><button class="auth-btn" data-accept>Join workspace</button>`

@@ -27,6 +27,28 @@ export const hasUsers = async (ctx) => !!(await ctx.db.query('users').first());
 export const openSignup = async (ctx) => signupMode() === 'open' || !(await hasUsers(ctx));
 export const inviteSignup = () => signupMode() !== 'closed';
 
+/**
+ * The site admin can invite people to create an account even while sign-up is closed.
+ * Admins are the emails in ADMIN_EMAILS (comma-separated), or, when that is unset, the
+ * deployment's first account.
+ */
+export async function isAdmin(ctx, user) {
+  if (!user) return false;
+  const list = String(process.env.ADMIN_EMAILS || '')
+    .split(',')
+    .map(normEmail)
+    .filter(Boolean);
+  if (list.length) return list.includes(user.email);
+  const first = await ctx.db.query('users').order('asc').first();
+  return !!first && first._id === user._id;
+}
+
+/** Whether someone without an account may create one with this invite. */
+export async function inviteAllowsSignup(ctx, inv) {
+  if (signupMode() !== 'closed') return true;
+  return isAdmin(ctx, await ctx.db.get(inv.createdBy));
+}
+
 /** The logged-in user for a session token, or a 401. */
 export async function requireUser(ctx, session) {
   if (!session) fail(401, 'Please log in');

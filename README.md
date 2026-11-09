@@ -28,7 +28,12 @@ One-time setup:
 
 From then on, every push to `main` runs `.github/workflows/deploy.yml`. It deploys the Convex functions to production, builds `dist/` against that deployment, and publishes it to `https://<user>.github.io/notion-clone/`.
 
-The first person to sign up on the site owns the imported workspace, if there is one. After that, **sign-up is closed**: nobody can create an account and invite links are off. To change this, set `SIGNUP` in the Convex dashboard (Settings → Environment Variables) to `invite` (people with an invite link) or `open` (anyone); remove it to close sign-up again.
+The first person to sign up on the site owns the imported workspace, if there is one, and is the **site admin**. To make other accounts admins, set `ADMIN_EMAILS` (comma-separated) in the Convex environment variables. After that, **sign-up is closed**. Only the admin can let someone new in:
+
+- **Settings → Sign-up invites** creates a link for one email. The person creates an account with their own workspace and doesn't join any of yours.
+- Workspace invites from the admin also create accounts, but only when bound to an email.
+
+Workspace invites from anyone else work only for people who already have an account. To change this, set `SIGNUP` in the Convex dashboard (Settings → Environment Variables) to `invite` (anyone with an invite link) or `open` (anyone at all). Remove it to close sign-up again.
 
 ### Import data from the old local server
 
