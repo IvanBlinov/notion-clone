@@ -2621,6 +2621,37 @@ async function openSettings(tab = 'members') {
       ),
       h('h4', {}, 'Your account'),
       h('div', { class: 'member' }, avatar(state.me), h('div', { class: 'grow' }, h('div', {}, state.me.name), h('div', { class: 'sub' }, state.me.email))),
+      ...(owner ? deleteSection() : []),
+    ];
+  }
+
+  function deleteSection() {
+    const others = state.workspaces.filter((x) => x.id !== WS_ID);
+    const confirmName = h('input', { class: 'field', placeholder: `Type “${w.name}” to confirm` });
+    const btn = h('button', { class: 'btn danger', disabled: true }, 'Delete workspace');
+    confirmName.addEventListener('input', () => (btn.disabled = confirmName.value.trim() !== w.name.trim()));
+    btn.onclick = async () => {
+      btn.disabled = true;
+      try {
+        await mutation(cx.workspaces.remove, { ...S, confirmName: confirmName.value });
+        if (others[0]) localStorage.setItem('ws', others[0].id);
+        else localStorage.removeItem('ws');
+        location.hash = '';
+        location.reload();
+      } catch (err) {
+        toast(err.message);
+        btn.disabled = false;
+      }
+    };
+    return [
+      h('h4', { class: 'danger-title' }, 'Delete workspace'),
+      h(
+        'div',
+        { class: 'hint' },
+        `Permanently deletes “${w.name}”: all its pages and databases (Trash included), members, invite links and connected AI agents. This can’t be undone.` +
+          (others.length ? '' : ' It’s your only workspace, so you’ll get a new empty one.'),
+      ),
+      h('div', { class: 'row' }, confirmName, btn),
     ];
   }
 

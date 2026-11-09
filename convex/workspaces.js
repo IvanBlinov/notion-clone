@@ -32,6 +32,44 @@ export const rename = mutation({
   },
 });
 
+/**
+ * Owner only, permanent. Members, invites, agent tokens and presence go at once; pages are
+ * deleted in batches afterwards (a big workspace can exceed one transaction's limits).
+ * The name must be typed back as confirmation.
+ */
+export const remove = mutation({
+  args: { session: v.string(), workspaceId: v.id('workspaces'), confirmName: v.string() },
+  handler: async (ctx, { session, workspaceId, confirmName }) => {
+    const user = await requireUser(ctx, session);
+    const { ws } = await requireOwner(ctx, workspaceId, user._id);
+    if (confirmName.trim() !== ws.name.trim()) fail(400, 'Type the workspace name exactly to confirm');
+    const byWs = (table, index) => ctx.db.query(table).withIndex(index, (q) => q.eq('workspaceId', workspaceId)).collect();
+    for (const row of [
+      ...(await byWs('members', 'by_workspace')),
+      ...(await byWs('invites', 'by_workspace')),
+      ...(await byWs('agentTokens', 'by_workspace_user')),
+      ...(await byWs('presence', 'by_workspace')),
+    ]) {
+      await ctx.db.delete(row._id);
+    }
+    for (const code of await ctx.db.query('oauthCodes').collect()) if (code.workspaceId === workspaceId) await ctx.db.delete(code._id);
+    await ctx.db.delete(workspaceId);
+    await ctx.scheduler.runAfter(0, internal.workspaces.deletePages, { workspaceId });
+  },
+});
+
+export const deletePages = internalMutation({
+  args: { workspaceId: v.id('workspaces') },
+  handler: async (ctx, { workspaceId }) => {
+    const batch = await ctx.db
+      .query('pages')
+      .withIndex('by_workspace', (q) => q.eq('workspaceId', workspaceId))
+      .take(200);
+    for (const p of batch) await ctx.db.delete(p._id);
+    if (batch.length === 200) await ctx.scheduler.runAfter(0, internal.workspaces.deletePages, { workspaceId });
+  },
+});
+
 /** Live info for the open workspace (agent activity indicator). */
 export const info = query({
   args: { session: v.string(), workspaceId: v.id('workspaces') },

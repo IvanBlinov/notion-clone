@@ -359,4 +359,20 @@ step('presence; owner removes a member');
 
 try { cli('env', 'remove', 'SIGNUP'); } catch {}
 assert.equal((await c.query(api.workspaces.inviteInfo, { token: inv.token })).valid, false);
+
+// ---------- deleting a workspace ----------
+// Alice is a member (not owner) of Carol's workspace: she can't delete it
+assert.equal((await errOf(c.mutation(api.workspaces.remove, { session: alice.session, workspaceId: C.workspaceId, confirmName: carolMe.workspaces[0].name }))).status, 403);
+assert.equal((await errOf(c.mutation(api.workspaces.remove, { ...C, confirmName: 'wrong' }))).status, 400);
+const cTok = await c.action(api.workspaces.createAgentToken, { ...C, name: 'to go' });
+await c.mutation(api.workspaces.remove, { ...C, confirmName: carolMe.workspaces[0].name });
+assert.equal((await c.query(api.auth.me, { session: carol.session })).workspaces.length, 0);
+assert.deepEqual((await c.query(api.auth.me, { session: alice.session })).workspaces.map((x) => x.id), [ws.id]);
+assert.equal((await errOf(c.query(api.pages.tree, { ...A, workspaceId: C.workspaceId }))).status, 404);
+const gone = await fetch(`${SITE}/agent/rpc`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${cTok.token}` }, body: JSON.stringify({ method: 'listTree' }) });
+assert.ok(gone.status >= 400);
+await new Promise((r) => setTimeout(r, 1500)); // page deletion runs in the background
+const left = JSON.parse(cli('data', 'pages', '--limit', '1000', '--format', 'jsonArray')).filter((p) => p.workspaceId === C.workspaceId);
+assert.equal(left.length, 0);
+step('owner deletes a workspace: confirm by name, members/tokens/pages gone, others untouched');
 console.log('\nALL SMOKE TESTS PASSED');
