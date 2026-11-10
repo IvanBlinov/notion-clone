@@ -11,7 +11,9 @@
 import type * as agent from "../agent.js";
 import type * as auth from "../auth.js";
 import type * as authNode from "../authNode.js";
+import type * as comments from "../comments.js";
 import type * as crons from "../crons.js";
+import type * as files from "../files.js";
 import type * as http from "../http.js";
 import type * as lib_sha256 from "../lib/sha256.js";
 import type * as lib_util from "../lib/util.js";
@@ -19,6 +21,7 @@ import type * as oauth from "../oauth.js";
 import type * as pages from "../pages.js";
 import type * as presence from "../presence.js";
 import type * as testing from "../testing.js";
+import type * as webhooks from "../webhooks.js";
 import type * as workspaces from "../workspaces.js";
 
 import type {
@@ -31,7 +34,9 @@ declare const fullApi: ApiFromModules<{
   agent: typeof agent;
   auth: typeof auth;
   authNode: typeof authNode;
+  comments: typeof comments;
   crons: typeof crons;
+  files: typeof files;
   http: typeof http;
   "lib/sha256": typeof lib_sha256;
   "lib/util": typeof lib_util;
@@ -39,6 +44,7 @@ declare const fullApi: ApiFromModules<{
   pages: typeof pages;
   presence: typeof presence;
   testing: typeof testing;
+  webhooks: typeof webhooks;
   workspaces: typeof workspaces;
 }>;
 

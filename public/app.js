@@ -622,7 +622,8 @@ function renderEmpty(msg) {
   $('#page').classList.remove('wide');
   $('#breadcrumb').replaceChildren();
   $('#edited-label').textContent = '';
-  $('#btn-fav').hidden = $('#btn-page-menu').hidden = true;
+  $('#btn-fav').hidden = $('#btn-page-menu').hidden = $('#btn-comments').hidden = true;
+  closeComments();
   $('#page').replaceChildren(
     h(
       'div',
@@ -643,7 +644,9 @@ function renderTop() {
     if (i) bc.append(h('span', { class: 'crumb-sep' }, '/'));
     bc.append(h('button', { class: 'crumb', onclick: () => go(c.id) }, `${c.icon ? c.icon + ' ' : ''}${label(c)}`));
   });
-  $('#btn-fav').hidden = $('#btn-page-menu').hidden = false;
+  $('#btn-fav').hidden = $('#btn-page-menu').hidden = $('#btn-comments').hidden = false;
+  renderCommentBadge();
+  if (comments.open && comments.pageId !== p.id) openComments();
   const fav = state.flat.get(p.id)?.favorite;
   $('#btn-fav').textContent = fav ? '★' : '☆';
   $('#btn-fav').classList.toggle('on', !!fav);
@@ -829,6 +832,19 @@ const dbDeps = {
   ws: () => ws(),
   me: () => state.me,
   avatar: (...a) => avatar(...a),
+  /** Databases of this workspace, for relation pickers. */
+  databases: () => [...state.flat.values()].filter((n) => n.kind === 'database').map((n) => ({ id: n.id, title: label(n), icon: n.icon })),
+  /** Schema of another database (for rollup settings). */
+  databaseSchema: (id) => query(cx.pages.rows, { ...ws(), pageId: id }),
+  /** Upload a file for a files property → { name, url, storageId }. */
+  upload: async (file) => {
+    if (file.size > 20 * 1024 * 1024) throw new Error(`${file.name} is larger than 20 MB`);
+    const url = await mutation(cx.files.uploadUrl, ws());
+    const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': file.type || 'application/octet-stream' }, body: file });
+    if (!res.ok) throw new Error(`Upload failed (${res.status})`);
+    const { storageId } = await res.json();
+    return mutation(cx.files.register, { ...ws(), storageId, name: file.name });
+  },
 };
 // Linked database views embedded in pages: one live component per block, reused across redraws.
 const linkedViews = new Map(); // block id -> { databaseId, inst }
@@ -851,6 +867,8 @@ function linkedViewEl(b) {
         onRemove: () => {
           removeBlock(b.id);
         },
+        // "@this_page" filters refer to the page this view sits on
+        thisPage: state.page ? { id: state.page.id, title: state.page.title } : null,
       },
     });
     entry = { databaseId: b.databaseId, inst };
@@ -886,6 +904,204 @@ async function addLinkedView(b) {
       },
     })),
   ]);
+}
+
+// ---------- comments ----------
+const comments = { open: false, pageId: null, unsub: null, counts: {}, countsUnsub: null, el: null };
+function renderCommentBadge() {
+  const n = state.page ? comments.counts[state.page.id] || 0 : 0;
+  const b = $('#btn-comments .badge');
+  b.hidden = !n;
+  b.textContent = n;
+  $('#btn-comments').title = n ? `${n} open comment thread${n === 1 ? '' : 's'}` : 'Comments';
+}
+function watchCommentCounts() {
+  comments.countsUnsub?.();
+  comments.countsUnsub = watch(cx.comments.counts, ws(), (c) => {
+    comments.counts = c || {};
+    renderCommentBadge();
+  });
+}
+function closeComments() {
+  comments.open = false;
+  comments.unsub?.();
+  comments.unsub = null;
+  comments.el?.remove();
+  comments.el = null;
+  document.body.classList.remove('comments-open');
+}
+function openComments() {
+  if (!state.page) return;
+  comments.unsub?.();
+  comments.open = true;
+  const pageId = (comments.pageId = state.page.id);
+  if (!comments.el) {
+    comments.el = h('aside', { class: 'comments-panel' });
+    $('#main').append(comments.el);
+  }
+  document.body.classList.add('comments-open');
+  const panel = comments.el;
+  let data = null;
+  let showResolved = false;
+  let pending = false;
+  const call = (fn, args) => mutation(fn, { ...ws(), ...args }).catch((err) => (toast(err.message), null));
+  const members = () => state.members || [];
+  /** A textarea that suggests @mentions. */
+  const composer = (placeholder, onSend, initial = '') => {
+    const ta = h('textarea', { class: 'cm-input', rows: 2, placeholder });
+    ta.value = initial;
+    const sugg = h('div', { class: 'cm-suggest' });
+    const send = h('button', { class: 'btn primary small', onclick: () => submit() }, 'Send');
+    const submit = async () => {
+      const text = ta.value.trim();
+      if (!text) return;
+      send.disabled = true;
+      const ok = await onSend(text);
+      send.disabled = false;
+      sugg.replaceChildren();
+      if (ok !== null) {
+        ta.value = '';
+        pending = false;
+        render(); // show it now, even though the box still has focus
+      }
+    };
+    ta.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        submit();
+      }
+    });
+    ta.addEventListener('input', () => {
+      const before = ta.value.slice(0, ta.selectionStart);
+      const m = before.match(/@([\p{L}\p{N}_.-]*)$/u);
+      if (!m) return sugg.replaceChildren();
+      const q = m[1].toLowerCase();
+      const hits = members().filter((x) => x.name.toLowerCase().includes(q)).slice(0, 6);
+      sugg.replaceChildren(
+        ...hits.map((x) =>
+          h(
+            'button',
+            {
+              class: 'cm-chip',
+              onmousedown: (e) => {
+                e.preventDefault();
+                const start = before.length - m[0].length;
+                ta.value = `${ta.value.slice(0, start)}@${x.name} ${ta.value.slice(ta.selectionStart)}`;
+                ta.selectionStart = ta.selectionEnd = start + x.name.length + 2;
+                sugg.replaceChildren();
+                ta.focus();
+              },
+            },
+            x.kind === 'agent' ? '🤖 ' : '@',
+            x.name,
+          ),
+        ),
+      );
+    });
+    return { el: h('div', { class: 'cm-composer' }, ta, sugg, h('div', { class: 'cm-row' }, h('span', { class: 'sub' }, 'Ctrl+Enter to send · @ to mention'), send)), focus: () => ta.focus() };
+  };
+  const textWithMentions = (c) => {
+    // highlight @Name for the mentioned members
+    const names = c.mentions.map((m) => m.name).filter(Boolean).sort((a, b) => b.length - a.length);
+    if (!names.length) return [c.text];
+    const re = new RegExp(`(@(?:${names.map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')}))`, 'gi');
+    return c.text.split(re).map((part, i) => (i % 2 ? h('span', { class: 'cm-mention' }, part) : part));
+  };
+  const commentEl = (c, thread) => {
+    const mine = c.author.id === state.me.id;
+    const owner = currentWs()?.role === 'owner';
+    const body = h('div', { class: 'cm-text' }, textWithMentions(c));
+    return h(
+      'div',
+      { class: 'cm-comment' },
+      h(
+        'div',
+        { class: 'cm-head' },
+        c.author.kind === 'agent' ? h('span', { class: 'avatar tiny agent' }, '🤖') : avatar(members().find((m) => m.id === c.author.id) || { name: c.author.name, color: '#999' }, 'tiny'),
+        h('b', {}, c.author.name),
+        h('span', { class: 'sub' }, timeAgo(c.createdAt) + (c.editedAt ? ' · edited' : '')),
+        h('span', { class: 'grow' }),
+        !c.parentId
+          ? h('button', { class: 'icon-btn small', title: thread.resolved ? 'Reopen' : 'Resolve', onclick: () => call(cx.comments.resolve, { commentId: c.id, resolved: !thread.resolved }) }, thread.resolved ? '↺' : '✓')
+          : null,
+        mine || owner
+          ? h(
+              'button',
+              {
+                class: 'icon-btn small',
+                title: 'More',
+                onclick: (e) =>
+                  menu(e.currentTarget, [
+                    mine
+                      ? {
+                          icon: '✎',
+                          name: 'Edit',
+                          run: () => {
+                            const ed = composer('Edit comment', (text) => call(cx.comments.edit, { commentId: c.id, text }), c.text);
+                            body.replaceWith(ed.el);
+                            ed.focus();
+                          },
+                        }
+                      : null,
+                    { icon: '🗑', name: c.parentId ? 'Delete' : 'Delete thread', danger: true, run: () => confirm('Delete this comment?') && call(cx.comments.remove, { commentId: c.id }) },
+                  ]),
+              },
+              '⋯',
+            )
+          : null,
+      ),
+      body,
+    );
+  };
+  const render = () => {
+    if (!panel.isConnected) return;
+    const threads = data?.threads || [];
+    const open = threads.filter((t) => !t.resolved);
+    const resolved = threads.filter((t) => t.resolved);
+    const top = composer('Add a comment…', (text) => call(cx.comments.add, { pageId, text }));
+    const threadEl = (t) => {
+      const replyBox = h('div');
+      return h(
+        'div',
+        { class: `cm-thread${t.resolved ? ' resolved' : ''}` },
+        commentEl(t, t),
+        t.replies.map((r) => commentEl(r, t)),
+        h(
+          'button',
+          {
+            class: 'cm-reply-btn',
+            onclick: (e) => {
+              const c = composer('Reply…', (text) => call(cx.comments.add, { pageId, text, parentId: t.id }));
+              replyBox.replaceChildren(c.el);
+              e.currentTarget.remove();
+              c.focus();
+            },
+          },
+          'Reply',
+        ),
+        replyBox,
+      );
+    };
+    panel.replaceChildren(
+      h('div', { class: 'cm-top' }, h('b', {}, 'Comments'), h('span', { class: 'sub' }, data ? `${open.length} open` : ''), h('span', { class: 'grow' }), h('button', { class: 'icon-btn', title: 'Close', onclick: closeComments }, '✕')),
+      h('div', { class: 'cm-list' }, !data ? h('div', { class: 'empty-note' }, 'Loading…') : !threads.length ? h('div', { class: 'empty-note' }, 'No comments yet. Ask a question or leave a note — agents can read and answer them too.') : null, open.map(threadEl), resolved.length ? h('button', { class: 'cm-resolved-toggle', onclick: () => ((showResolved = !showResolved), render()) }, `${showResolved ? '▾' : '▸'} Resolved (${resolved.length})`) : null, showResolved ? resolved.map(threadEl) : null),
+      top.el,
+    );
+  };
+  panel.addEventListener('focusout', () =>
+    setTimeout(() => {
+      if (pending && !panel.contains(document.activeElement)) {
+        pending = false;
+        render();
+      }
+    }, 0),
+  );
+  render();
+  comments.unsub = watch(cx.comments.list, { ...ws(), pageId }, (d) => {
+    data = d;
+    if (panel.contains(document.activeElement) && document.activeElement.matches('textarea') && document.activeElement.value) pending = true;
+    else render();
+  });
 }
 
 /** Redraw an item's property panel after a change from elsewhere (unless someone is typing in it). */
@@ -2540,7 +2756,20 @@ async function openSettings(tab = 'members') {
           'div',
           { class: 'member' },
           h('span', { class: 'avatar ghost' }, '🔑'),
-          h('div', { class: 'grow' }, h('div', {}, t.name), h('div', { class: 'sub' }, `Created ${timeAgo(new Date(t.createdAt).toISOString())} · ${t.lastUsedAt ? `last used ${timeAgo(new Date(t.lastUsedAt).toISOString())}` : 'never used'}`)),
+          h('div', { class: 'grow' }, h('div', {}, t.name), h('div', { class: 'sub' }, `Created ${timeAgo(new Date(t.createdAt).toISOString())} · ${t.lastUsedAt ? `last used ${timeAgo(new Date(t.lastUsedAt).toISOString())}` : 'never used'} · can be assigned in person properties`)),
+          h(
+            'button',
+            {
+              class: 'btn',
+              title: 'The name it has in person properties and comments',
+              onclick: (e) =>
+                askInput(e.currentTarget, 'Agent name, e.g. Claude', t.name, async (name) => {
+                  await mutation(cx.workspaces.renameAgentToken, { session: S.session, tokenId: t.id, name }).catch((err) => toast(err.message));
+                  show('agent');
+                }),
+            },
+            'Rename',
+          ),
           h(
             'button',
             {
@@ -2621,8 +2850,59 @@ async function openSettings(tab = 'members') {
       ),
       h('h4', {}, 'Your account'),
       h('div', { class: 'member' }, avatar(state.me), h('div', { class: 'grow' }, h('div', {}, state.me.name), h('div', { class: 'sub' }, state.me.email))),
+      ...(owner ? await webhooksSection() : []),
       ...(owner ? deleteSection() : []),
     ];
+  }
+
+  async function webhooksSection() {
+    const box = h('div');
+    const draw = async () => {
+      const hooks = await query(cx.webhooks.list, S).catch(() => []);
+      const url = h('input', { class: 'field', placeholder: 'https://example.com/hooks/notion' });
+      const events = h(
+        'select',
+        { class: 'field narrow' },
+        h('option', { value: '*' }, 'All events'),
+        h('option', { value: 'item.*' }, 'Database items'),
+        h('option', { value: 'item.updated' }, 'Item changes only'),
+        h('option', { value: 'comment.*' }, 'Comments'),
+        h('option', { value: 'page.*' }, 'Pages'),
+      );
+      const result = h('div');
+      const add = async () => {
+        try {
+          const r = await action(cx.webhooks.create, { ...S, url: url.value.trim(), events: [events.value] });
+          await draw();
+          box.append(h('div', { class: 'hint' }, 'Signing secret (shown once — store it in your receiver): '), snippet(r.secret));
+        } catch (err) {
+          toast(err.message);
+        }
+      };
+      box.replaceChildren(
+        h('h4', {}, 'Webhooks'),
+        h('div', { class: 'hint' }, 'POST a signed JSON event to a URL when pages, items or comments change — e.g. to tell an agent that a task was marked Done.'),
+        ...hooks.map((wh) =>
+          h(
+            'div',
+            { class: 'member' },
+            h('span', { class: 'avatar ghost' }, '⚡'),
+            h(
+              'div',
+              { class: 'grow' },
+              h('div', { class: 'ellipsis' }, wh.url),
+              h('div', { class: 'sub' }, `${wh.events.join(', ')} · ${wh.lastDelivery ? `last ${timeAgo(wh.lastDelivery.at)}: ${wh.lastDelivery.error || `HTTP ${wh.lastDelivery.status}`}` : 'not called yet'}${wh.failuresInARow > 1 ? ` · ${wh.failuresInARow} failures in a row` : ''}`),
+            ),
+            h('button', { class: 'btn', onclick: () => mutation(cx.webhooks.test, { ...S, hookId: wh.id }).then(() => toast('Test event sent')).catch((err) => toast(err.message)) }, 'Test'),
+            h('button', { class: 'btn danger', onclick: async () => confirm('Delete this webhook?') && (await mutation(cx.webhooks.remove, { ...S, hookId: wh.id }), draw()) }, 'Delete'),
+          ),
+        ),
+        h('div', { class: 'row' }, url, events, h('button', { class: 'btn primary', onclick: add }, 'Add')),
+        result,
+      );
+    };
+    await draw();
+    return [box];
   }
 
   function deleteSection() {
@@ -2662,7 +2942,7 @@ async function openSettings(tab = 'members') {
 // =====================================================================
 // Live updates (Convex subscriptions)
 // =====================================================================
-const subs = { tree: null, presence: null, info: null, page: null };
+const subs = { tree: null, presence: null, info: null, page: null, people: null };
 const stop = (k) => {
   subs[k]?.();
   subs[k] = null;
@@ -2670,8 +2950,10 @@ const stop = (k) => {
 
 /** Subscribe to the sidebar tree, presence and workspace info of the current workspace. */
 function watchWorkspace() {
-  ['tree', 'presence', 'info'].forEach(stop);
+  ['tree', 'presence', 'info', 'people'].forEach(stop);
   const args = ws();
+  watchCommentCounts();
+  subs.people = watch(cx.comments.people, args, (list) => (state.members = list || []));
   subs.tree = watch(cx.pages.tree, args, (tree) => {
     setTree(tree);
     if (state.page) renderTop();
@@ -2750,6 +3032,7 @@ $('#btn-agent').onclick = () => openSettings('agent');
 $('#btn-invite').onclick = () => openSettings('members');
 $('#ws-switcher').onclick = (e) => workspaceMenu(e.currentTarget);
 $('#btn-fav').onclick = () => state.page && toggleFavorite(state.page.id);
+$('#btn-comments').onclick = () => (comments.open ? closeComments() : openComments());
 $('#btn-page-menu').onclick = (e) => state.page && pageMenu(e.currentTarget, state.page.id);
 const setSidebar = (open) => {
   $('#app').classList.toggle('sidebar-closed', !open);

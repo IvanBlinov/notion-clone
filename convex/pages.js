@@ -23,8 +23,10 @@ export const WRITE_METHODS = new Set([
   'updateDatabase',
   'createRows',
   'updateRows',
+  'upsertRows',
   'archiveRows',
   'saveView',
+  'saveTemplate',
   'createLinkedView',
   'updateLinkedView',
 ]);
@@ -92,7 +94,7 @@ export const run = mutation({
     const { user, model, commit } = await open(ctx, session, workspaceId);
     const actor = { client: clientId || 'web', kind: 'user', name: user.name, userId: user._id };
     const result = runModel(() => model[method](args || {}, actor));
-    await commit();
+    await commit({ actor: user.name });
     return result ?? null;
   },
 });

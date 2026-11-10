@@ -98,6 +98,40 @@ export default defineSchema({
     .index('by_workspace', ['workspaceId'])
     .index('by_workspace_pid', ['workspaceId', 'pid']),
 
+  // Comments on pages and database items (pageId = the page's pid). parentId = the thread's first comment.
+  comments: defineTable({
+    workspaceId: v.id('workspaces'),
+    pageId: v.string(),
+    parentId: v.union(v.id('comments'), v.null()),
+    authorId: v.union(v.string(), v.null()), // user id, or "agent_<token id>" for an AI agent
+    authorName: v.string(),
+    authorKind: v.string(), // 'user' | 'agent'
+    text: v.string(),
+    mentions: v.array(v.string()),
+    resolved: v.boolean(),
+    resolvedBy: v.optional(v.string()),
+    createdAt: v.number(),
+    editedAt: v.optional(v.number()),
+  })
+    .index('by_page', ['workspaceId', 'pageId'])
+    .index('by_workspace', ['workspaceId', 'createdAt']),
+
+  // Outgoing webhooks: POST a signed JSON event list to `url` after changes.
+  webhooks: defineTable({
+    workspaceId: v.id('workspaces'),
+    url: v.string(),
+    events: v.array(v.string()),
+    databaseId: v.union(v.string(), v.null()),
+    secret: v.string(),
+    description: v.string(),
+    createdBy: v.string(),
+    createdAt: v.number(),
+    lastStatus: v.union(v.number(), v.null()),
+    lastError: v.union(v.string(), v.null()),
+    lastAt: v.union(v.number(), v.null()),
+    failures: v.number(),
+  }).index('by_workspace', ['workspaceId']),
+
   presence: defineTable({
     workspaceId: v.id('workspaces'),
     clientId: v.string(),

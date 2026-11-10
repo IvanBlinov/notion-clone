@@ -5,6 +5,10 @@ import { internal } from './_generated/api';
 import { createMcpServer } from '../src/tools.js';
 import { sha256 } from './lib/sha256.js';
 import { randomToken, validRedirectUri } from './oauth.js';
+import { newSecret } from './webhooks.js';
+
+// webhook secrets are made here: HTTP actions have real randomness, mutations don't
+const withSecret = (method, args) => (method === 'createWebhook' ? { ...(args || {}), secret: newSecret() } : args || {});
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
@@ -28,7 +32,7 @@ const base64url = (bytes) => btoa(String.fromCharCode(...new Uint8Array(bytes)))
 function agentApi(ctx, token) {
   let tool;
   return {
-    call: (method, args) => ctx.runMutation(internal.agent.call, { token, method, args: args || {}, tool }).catch(unwrap),
+    call: (method, args) => ctx.runMutation(internal.agent.call, { token, method, args: withSecret(method, args), tool }).catch(unwrap),
     onTool: (name) => {
       tool = name;
     },
@@ -86,7 +90,7 @@ route('/agent/rpc', 'POST', async (ctx, request) => {
   if (!token) return json(401, { error: 'Agent token required' });
   const { method, args, tool } = await request.json().catch(() => ({}));
   try {
-    const result = await ctx.runMutation(internal.agent.call, { token, method: String(method || ''), args: args || {}, tool });
+    const result = await ctx.runMutation(internal.agent.call, { token, method: String(method || ''), args: withSecret(method, args), tool });
     return json(200, { result });
   } catch (err) {
     return json(err?.data?.status || 500, { error: err?.data?.message || err.message });

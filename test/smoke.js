@@ -214,6 +214,167 @@ step('MCP rejects bad tokens');
 }
 step('databases: 187 items in one call, idempotent retry, filters/sorts/pagination, bulk update, views, renames, version conflicts');
 
+// ---------- the tracker features: relations, rollups, formulas, upsert, @this_page, files, comments… ----------
+{
+  const m = new Client({ name: 'smoke-tracker', version: '1' });
+  await m.connect(new StreamableHTTPClientTransport(new URL(`${SITE}/mcp`), { requestInit: { headers: { Authorization: `Bearer ${token}` } } }));
+  const J = async (name, args) => {
+    const r = await call(m, name, args);
+    if (r.isError) throw new Error(`${name}: ${txt(r)}`);
+    return r.structuredContent;
+  };
+  const fails = async (name, args, re) => {
+    const r = await call(m, name, args);
+    assert.equal(r.isError, true, `${name} should fail`);
+    if (re) assert.match(txt(r), re);
+  };
+  const ctx = await J('get_context', {});
+  assert.ok(ctx.agent.id.startsWith('agent_'));
+  assert.ok(ctx.members.some((x) => x.id === ctx.agent.id && x.kind === 'agent')); // 15. the agent is assignable
+
+  const hub = (await J('create_page', { title: 'Tracker' })).id;
+  const epics = await J('create_database', { title: 'Epics', parent_id: hub, properties: [{ name: 'ID', type: 'unique_id', prefix: 'E' }] });
+  const tasks = await J('create_database', {
+    title: 'Tasks',
+    parent_id: hub,
+    sub_items: true,
+    dependencies: true,
+    properties: [
+      { name: 'Status', type: 'status', options: ['Not started', 'In progress', { name: 'Waiting on owner', group: 'in_progress' }, 'Done'] },
+      { name: 'Epic', type: 'relation', database_id: epics.id, two_way: true, reverse_name: 'Subtasks' },
+      { name: 'Owner', type: 'person' },
+      { name: 'Run', type: 'date' },
+      { name: 'Credits', type: 'number' },
+      { name: 'Links', type: 'links' },
+      { name: 'Looks', type: 'files' },
+      { name: 'Key', type: 'text' },
+    ],
+    views: [
+      { name: 'Calendar', type: 'calendar', date_property: 'Run' },
+      { name: 'Timeline', type: 'timeline', date_property: 'Run' },
+      { name: 'Gallery', type: 'gallery', cover_property: 'Looks', card_size: 'large' },
+      { name: 'List', type: 'list' },
+    ],
+  });
+  assert.ok(['Sub-items', 'Parent item', 'Blocked by', 'Blocking'].every((n) => tasks.properties.some((p) => p.name === n))); // 9
+  assert.equal((await J('get_database', { database_id: epics.id })).properties.find((p) => p.name === 'Subtasks').type, 'relation'); // 1. two-way
+  assert.deepEqual(tasks.views.map((v) => v.type), ['table', 'calendar', 'timeline', 'gallery', 'list']); // 8
+  const status = tasks.properties.find((p) => p.name === 'Status');
+  assert.equal(status.options.find((o) => o.name === 'Waiting on owner').group, 'in_progress'); // 11
+
+  const e = await J('create_database_items', { database_id: epics.id, items: [{ properties: { Name: 'Launch scope' } }, { properties: { Name: 'TestFlight' } }] });
+  const [e1, e2] = e.results.map((x) => x.id);
+  await J('update_database', {
+    database_id: epics.id,
+    add_properties: [
+      { name: 'Progress', type: 'rollup', relation: 'Subtasks', property: 'Status', function: 'percent_where', value: '@complete', display: 'bar' },
+      { name: 'Credits', type: 'rollup', relation: 'Subtasks', property: 'Credits', function: 'sum' },
+      { name: 'Label', type: 'formula', expression: 'concat(prop("ID"), ": ", format(round(prop("Progress") * 100)), "%")' },
+    ],
+  });
+  await fails('update_database', { database_id: epics.id, add_properties: [{ name: 'Bad', type: 'formula', expression: 'prop("Nope") +' }] });
+
+  // 3. upsert by a key: create, then update / leave unchanged without looking up ids
+  const items = [
+    { properties: { Key: 'GEN', Name: 'Genesis pack', Status: 'Done', Epic: 'E-1', Credits: 40, Owner: '@agent', Run: { start: '2026-11-08T00:51:17Z', end: '2026-11-08T02:58:12Z' }, Links: [{ label: 'Spec', url: 'https://example.com/spec' }, 'https://github.com/x/y'] } },
+    { properties: { Key: 'EXO', Name: 'Exodus pack', Status: 'Waiting on owner', Epic: 'Launch scope', Credits: 10, Looks: [{ name: 'Moses · elder', url: 'https://example.com/moses.png' }] } },
+    { properties: { Key: 'TF', Name: 'Upload build', Status: 'Not started', Epic: e2, 'Blocked by': ['Exodus pack'] } },
+  ];
+  let up = await J('upsert_database_items', { database_id: tasks.id, match_property: 'Key', items });
+  assert.deepEqual([up.created, up.updated, up.unchanged, up.failed], [3, 0, 0, 0]);
+  up = await J('upsert_database_items', { database_id: tasks.id, match_property: 'Key', items: [items[0], { properties: { Key: 'EXO', Credits: 12 } }, { properties: { Key: 'NEW', Name: 'Leviticus' } }] });
+  assert.deepEqual([up.created, up.updated, up.unchanged, up.failed], [1, 1, 1, 0]);
+
+  // 2. rollups and formulas follow the relation
+  let ep = (await J('query_database', { database_id: epics.id, sorts: [{ property: 'ID' }] })).items;
+  assert.equal(ep[0].properties.ID, 'E-1'); // 14
+  assert.equal(ep[0].properties.Progress, 0.5);
+  assert.equal(ep[0].properties.Credits, 52);
+  assert.equal(ep[0].properties.Label, 'E-1: 50%');
+  assert.deepEqual(ep[0].properties.Subtasks.map((s) => s.title).sort(), ['Exodus pack', 'Genesis pack']);
+
+  // 9 + 11. dependencies and status groups
+  let open = await J('query_database', { database_id: tasks.id, filters: [{ property: 'Status', operator: 'not_in_group', value: 'complete' }, { property: 'Is blocked', operator: 'equals', value: true }] });
+  assert.deepEqual(open.items.map((i) => i.title), ['Upload build']);
+  const exo = up.results[1].id;
+  await J('update_database_items', { updates: [{ item_id: exo, properties: { Status: 'Done' } }] });
+  open = await J('query_database', { database_id: tasks.id, filters: [{ property: 'Is blocked', operator: 'equals', value: true }] });
+  assert.equal(open.total, 0);
+  const sub = await J('create_database_items', { database_id: tasks.id, items: [{ properties: { Name: 'Fix parser' }, parent_item_id: up.results[0].id }] });
+  assert.equal((await J('query_database', { database_id: tasks.id, parent_item_id: up.results[0].id })).items[0].id, sub.results[0].id);
+
+  // 7. date-times and ranges; 10. several links; 5. files; 15. the agent as assignee
+  const gen = (await J('query_database', { database_id: tasks.id, filters: [{ property: 'Key', operator: 'equals', value: 'GEN' }] })).items[0];
+  assert.equal(gen.properties.Run, '2026-11-08T00:51:17Z → 2026-11-08T02:58:12Z');
+  assert.equal(gen.properties.Links.length, 2);
+  assert.deepEqual(gen.properties.Owner, [ctx.agent.name]);
+  assert.equal((await J('query_database', { database_id: tasks.id, filters: [{ property: 'Run', operator: 'after', value: '2026-11-08T00:30:00Z' }] })).total, 1);
+  await J('update_database', { database_id: tasks.id, add_properties: [{ name: 'Minutes', type: 'formula', expression: 'dateBetween(end(prop("Run")), start(prop("Run")), "minutes")' }] });
+  assert.equal((await J('query_database', { database_id: tasks.id, filters: [{ property: 'Key', operator: 'equals', value: 'GEN' }] })).items[0].properties.Minutes, 126);
+
+  // 12. aggregations
+  const agg = await J('query_database', { database_id: tasks.id, aggregations: { Credits: 'sum', Status: 'percent_checked' } });
+  assert.equal(agg.aggregations.Credits.value, 52);
+  assert.equal(agg.aggregations.Credits.text, '52');
+
+  // 13 + 4. a template with a linked view that filters by "@this_page"
+  await J('save_database_template', {
+    database_id: epics.id,
+    name: 'Epic',
+    is_default: true,
+    content: '## Done when\n\n## Owner actions',
+    linked_views: [{ database_id: tasks.id, name: 'Subtasks', filters: [{ property: 'Epic', operator: 'contains', value: '@this_page' }] }],
+  });
+  const e3 = (await J('create_database_items', { database_id: epics.id, items: [{ properties: { Name: 'Characters' } }] })).results[0].id;
+  const e3page = await J('get_page', { page_id: e3 });
+  assert.match(e3page.content, /## Done when/);
+  assert.equal(e3page.linkedViews[0].filters[0].value, '@this_page');
+  assert.equal(e3page.properties.ID, 'E-3');
+  await J('create_database_items', { database_id: tasks.id, items: [{ properties: { Name: 'Draw Moses', Epic: e3 } }] });
+  const viaThis = await J('query_database', { database_id: tasks.id, filters: e3page.linkedViews[0].filters, context_page_id: e3 });
+  assert.deepEqual(viaThis.items.map((i) => i.title), ['Draw Moses']);
+  await J('update_page', { page_id: e3, title: 'Characters (renamed)' }); // still matches: by id, not title
+  assert.equal((await J('query_database', { database_id: tasks.id, filters: e3page.linkedViews[0].filters, context_page_id: e3 })).total, 1);
+  const plain = (await J('create_database_items', { database_id: epics.id, items: [{ properties: { Name: 'No template' }, template: 'none' }] })).results[0].id;
+  assert.equal((await J('get_page', { page_id: plain })).linkedViews, undefined);
+
+  // 6. comments: agent asks, the owner answers in the app, the agent reads unresolved threads
+  const q1 = await J('add_comment', { page_id: up.results[1].id, text: 'Ship Exodus with the elder look? @Alice' });
+  assert.equal(q1.comment.mentions[0].name, 'Alice');
+  await c.mutation(api.comments.add, { ...A, pageId: up.results[1].id, text: 'Yes, ship it', parentId: q1.comment.id });
+  let threads = await J('list_comments', { unresolved_only: true });
+  assert.equal(threads.threads[0].replies[0].text, 'Yes, ship it');
+  assert.equal(threads.threads[0].replies[0].author.name, 'Alice');
+  await J('resolve_comment', { comment_id: q1.comment.id });
+  assert.equal((await J('list_comments', { unresolved_only: true })).total, 0);
+  assert.equal((await c.query(api.comments.counts, A))[up.results[1].id], undefined);
+
+  // 16. what changed + webhooks
+  const since = new Date(Date.now() - 1000).toISOString();
+  await c.mutation(api.pages.run, { ...A, method: 'updateRows', args: { updates: [{ itemId: up.results[2].id, properties: { Status: 'Done' } }] } });
+  const ch = await J('list_changes', { since, database_id: tasks.id });
+  assert.ok(ch.changes.some((x) => x.id === up.results[2].id && x.lastEditedBy === 'Alice' && x.properties.Status === 'Done'));
+  await fails('create_webhook', { url: 'http://127.0.0.1:9/hook' }, /https/);
+  await fails('create_webhook', { url: 'https://10.0.0.5/hook' }, /Private/);
+  const hook = await J('create_webhook', { url: 'https://example.com/notion-hook', events: ['item.updated'], database_id: tasks.id });
+  assert.match(hook.webhook.secret, /^whsec_[0-9a-f]{48}$/);
+  await c.mutation(api.pages.run, { ...A, method: 'updateRows', args: { updates: [{ itemId: up.results[2].id, properties: { Credits: 5 } }] } });
+  let delivered = null;
+  for (let i = 0; i < 40 && !delivered; i++) {
+    await new Promise((r) => setTimeout(r, 250));
+    delivered = (await J('list_webhooks', {})).webhooks[0].lastDelivery;
+  }
+  assert.ok(delivered, 'the webhook was called (any HTTP result or network error counts)');
+  assert.equal((await J('delete_webhook', { webhook_id: hook.webhook.id })).deleted, true);
+
+  // the browser gets computed values and related titles
+  const brow = await c.query(api.pages.rows, { ...A, pageId: epics.id });
+  assert.equal(brow.rows.find((r) => r.id === e1).props[brow.database.properties.find((p) => p.name === 'Progress').id], 1);
+  assert.ok(brow.related[tasks.id].rows.length >= 4);
+  await m.close();
+}
+step('tracker features: relations, rollups, formulas, upsert, @this_page, templates, status groups, sub-items, dependencies, date-times, files/links, aggregations, comments, changes, webhooks, agent member');
+
 // ---------- stdio bridge ----------
 const stdio = new Client({ name: 'smoke-stdio', version: '1' });
 await stdio.connect(new StdioClientTransport({ command: process.execPath, args: [path.join(root, 'src', 'mcp-stdio.js')], env: { ...process.env, NOTION_URL: SITE, NOTION_TOKEN: token }, stderr: 'ignore' }));

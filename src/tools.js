@@ -1,7 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { blocksToMarkdown, blockToMarkdown, BLOCK_TYPES } from './shared/markdown.js';
-import { PROPERTY_TYPES, OPERATORS } from './shared/database.js';
+import { PROPERTY_TYPES, OPERATORS, VIEW_TYPES, ROLLUP_FUNCTIONS, AGGREGATIONS, NUMBER_FORMATS } from './shared/database.js';
 
 /** API backed by the Convex deployment's HTTP endpoint (used by the stdio bridge). */
 export function httpApi(siteUrl, token) {
@@ -37,13 +37,24 @@ PAGES hold free-form content written as Markdown:
 DATABASES hold structured records (tasks, contacts, budgets…). Prefer them over Markdown checklists whenever items have
 owners, statuses, dates or numbers. Each item is also a page, so it can have Markdown content too.
 - create_database with typed properties (${PROPERTY_TYPES.join(', ')}); select options are created on first use.
-- create_database_items adds up to 300 items per call (pass idempotency_key so a retry never duplicates).
-- query_database filters, sorts and paginates; update_database_items changes many items at once.
-- save_database_view stores table or board views (e.g. "My tasks", "Critical", a Kanban board grouped by Status).
-- Person values: member id, email, unambiguous name, or "me". Dates: YYYY-MM-DD, "today", "+7d".
+  relation links items across (or within) databases, two-way if you ask; rollup summarizes related items
+  (count, sum, percent_where "Done"…); formula computes from other properties (prop("A") / prop("B"));
+  status has To-do / In progress / Complete groups; unique_id numbers items (E-1, E-2…); files and links hold lists.
+  sub_items / dependencies on a database add Parent item / Sub-items or Blocked by / Blocking (items show "blocked").
+- create_database_items adds up to 300 items per call (pass idempotency_key so a retry never duplicates);
+  upsert_database_items matches existing items by a key property and updates them, creating only missing ones.
+- query_database filters, sorts, paginates and totals (aggregations); update_database_items changes many items at once.
+- save_database_view stores table, board, list, gallery, calendar or timeline views.
+- save_database_template stores item templates (content, default values, linked views); new items use the default one.
+- Person values: member id, email, unambiguous name, "me" (the user) or "@agent" (you). Dates: YYYY-MM-DD,
+  "today", "+7d", or date-times like 2026-11-08T00:51:17Z; ranges as {"start": …, "end": …}.
+- Comments: list_comments (e.g. unresolved answers from the owner), add_comment, resolve_comment.
+- list_changes tells you what changed since your last session; create_webhook pushes changes to a URL.
 - create_linked_database_view shows a database inside any other page as a live, filtered table or board (e.g. only
   this stage's tasks on a stage page). It uses the same records; new items added there get the filtered values.
   In Markdown it appears as "[View name](database_view:BLOCK_ID)"; keep that line in replace_page_content to keep it.
+  Filter value "@this_page" means the page the view sits on (e.g. Epic contains @this_page), so the view keeps
+  working when the page is renamed or duplicated, and can live in a template.
 
 Every result includes ids and a url to open the page in the app; share urls with the user.
 Never guess ids: use list_pages, search_pages, get_database or query_database.
@@ -101,23 +112,75 @@ export function createMcpServer(api, opts = {}) {
   const filterSchema = z
     .array(z.any())
     .describe(
-      `Filters, all must match: [{"property": "Status", "operator": "not_equals", "value": "Done"}, {"property": "Assignee", "operator": "contains", "value": "me"}]. Use {"or": [ ...filters ]} for alternatives. Operators: ${OPERATORS.join(', ')}. Dates accept YYYY-MM-DD, "today", "+7d". Built-in properties: "Created time", "Last edited time".`,
+      `Filters, all must match: [{"property": "Status", "operator": "not_equals", "value": "Done"}, {"property": "Assignee", "operator": "contains", "value": "me"}]. Use {"or": [ ...filters ]} for alternatives. Operators: ${OPERATORS.join(', ')}. in_group / not_in_group take a status group: todo, in_progress, complete. Dates accept YYYY-MM-DD, "today", "+7d", ISO date-times. Relations match item ids or titles. Value "@this_page" = the page a linked view is on. Built-in properties: "Created time", "Last edited time", "Is blocked" (with dependencies).`,
     );
   const sortSchema = z.array(z.any()).describe('Sorts: [{"property": "Due", "direction": "ascending"}] (empty values last). Without sorts, manual order.');
+  const optionSpec = z.union([z.string(), z.object({ name: z.string(), color: z.string().optional(), group: z.enum(['todo', 'in_progress', 'complete']).optional() })]);
   const propertySpec = z.object({
     name: z.string(),
-    type: z.enum([...PROPERTY_TYPES, 'status']).describe('"status" is a select'),
-    options: z.array(z.union([z.string(), z.object({ name: z.string(), color: z.string().optional() })])).optional().describe('For select / multi_select'),
+    type: z.enum(PROPERTY_TYPES),
+    options: z.array(optionSpec).optional().describe('select / multi_select / status options. Status options may set group (todo, in_progress, complete); otherwise it is guessed from the name.'),
+    database_id: z.string().optional().describe('relation: the database whose items it links to ("self" for the same database)'),
+    two_way: z.boolean().optional().describe('relation: also add a reverse property to the other database, kept in sync'),
+    reverse_name: z.string().optional().describe('relation: name of that reverse property'),
+    limit: z.literal(1).optional().describe('relation: 1 = at most one linked item'),
+    relation: z.string().optional().describe('rollup: the relation property to follow'),
+    property: z.string().optional().describe('rollup: property of the related items to summarize (default: title)'),
+    function: z.enum(ROLLUP_FUNCTIONS).optional().describe('rollup: how to summarize; count_where / percent_where need value (e.g. "Done", or "@complete" for a status group)'),
+    value: z.string().optional().describe('rollup: the value count_where / percent_where look for'),
+    expression: z.string().optional().describe('formula, e.g. prop("Scenes illustrated") / prop("Scenes"), if(prop("Done"), "✓", ""), dateBetween(prop("End"), prop("Start"), "minutes")'),
+    format: z.enum(NUMBER_FORMATS).optional().describe('number / rollup / formula display format'),
+    display: z.enum(['number', 'bar', 'ring']).optional().describe('number / rollup / formula: show 0–1 values as a progress bar or ring'),
+    prefix: z.string().optional().describe('unique_id: prefix, e.g. "E" → E-1, E-2'),
   });
   const viewSpec = {
     name: z.string().optional(),
-    type: z.enum(['table', 'board']).optional().describe('board = Kanban columns grouped by group_by'),
-    group_by: z.string().optional().describe('Select, person or checkbox property for board columns'),
+    type: z.enum(VIEW_TYPES).optional().describe('board = Kanban grouped by group_by; gallery = cards with a cover image; calendar / timeline place items by a date property'),
+    group_by: z.string().optional().describe('Status, select, person or checkbox property for board columns'),
+    date_property: z.string().optional().describe('calendar / timeline: the date property to place items by'),
+    end_property: z.string().optional().describe('timeline: a second date property for the end (otherwise the date range end)'),
+    cover_property: z.string().optional().describe('gallery: files property for the card image, "content" (first image in the item) or "none"'),
+    card_size: z.enum(['small', 'medium', 'large']).optional(),
+    aggregations: z.record(z.string(), z.enum(AGGREGATIONS)).optional().describe('Table footer calculations by property, e.g. {"Credits": "sum", "Done": "percent_checked"}'),
+    show_sub_items: z.boolean().optional().describe('Tables of databases with sub-items nest them under their parent (default true)'),
     filters: filterSchema.optional(),
     sorts: sortSchema.optional(),
     visible_properties: z.array(z.string()).optional().describe('Columns to show, in order (default: all)'),
   };
-  const toView = (v) => ({ name: v.name, type: v.type, groupBy: v.group_by, filters: v.filters, sorts: v.sorts, visibleProperties: v.visible_properties });
+  const defined = (o) => Object.fromEntries(Object.entries(o).filter(([, x]) => x !== undefined));
+  const toView = (v) =>
+    defined({
+      name: v.name,
+      type: v.type,
+      groupBy: v.group_by,
+      filters: v.filters,
+      sorts: v.sorts,
+      visibleProperties: v.visible_properties,
+      dateProperty: v.date_property,
+      endProperty: v.end_property,
+      coverProperty: v.cover_property,
+      cardSize: v.card_size,
+      aggregations: v.aggregations,
+      showSubItems: v.show_sub_items,
+    });
+  const toProperty = (p) =>
+    defined({
+      name: p.name,
+      type: p.type,
+      options: p.options,
+      databaseId: p.database_id,
+      twoWay: p.two_way,
+      reverseName: p.reverse_name,
+      limit: p.limit,
+      relation: p.relation,
+      property: p.property,
+      function: p.function,
+      value: p.value,
+      expression: p.expression,
+      format: p.format,
+      display: p.display,
+      prefix: p.prefix,
+    });
 
   // ======================================================================
   // Context
@@ -445,7 +508,7 @@ export function createMcpServer(api, opts = {}) {
     {
       title: 'Create database',
       description:
-        'Create a database (a page whose items are typed records) under parent_id. It gets an "All" table view; add more views here or with save_database_view. Example properties: [{"name":"Status","type":"status","options":["Not Started","In Progress","Blocked","Done"]}, {"name":"Assignee","type":"person"}, {"name":"Due","type":"date"}, {"name":"Priority","type":"select","options":["Low","Medium","High","Critical"]}].',
+        'Create a database (a page whose items are typed records) under parent_id. It gets an "All" table view; add more views here or with save_database_view. Example properties: [{"name":"Status","type":"status","options":["Not started","In progress",{"name":"Waiting on owner","group":"in_progress"},"Done"]}, {"name":"Assignee","type":"person"}, {"name":"Due","type":"date"}, {"name":"Epic","type":"relation","database_id":"<epics id>","two_way":true,"reverse_name":"Subtasks"}, {"name":"ID","type":"unique_id","prefix":"T"}]. Rollups and formulas over a relation are easiest to add afterwards with update_database.',
       inputSchema: {
         title: z.string(),
         parent_id: z.string().optional().describe('Page to create it in (it appears there as a block); omit for top level'),
@@ -454,17 +517,21 @@ export function createMcpServer(api, opts = {}) {
         properties: z.array(propertySpec).optional(),
         views: z.array(z.object(viewSpec)).optional().describe('Extra views, e.g. [{"name":"Board","type":"board","group_by":"Status"}]'),
         description: z.string().optional().describe('Markdown shown above the views'),
+        sub_items: z.boolean().optional().describe('Add Parent item / Sub-items so items can nest'),
+        dependencies: z.boolean().optional().describe('Add Blocked by / Blocking; items whose blockers are not complete show as blocked'),
       },
     },
-    async ({ title, parent_id, icon, title_property, properties, views, description }) => {
+    async ({ title, parent_id, icon, title_property, properties, views, description, sub_items, dependencies }) => {
       const db = await api.call('createDatabase', {
         title,
         parentId: parent_id || null,
         icon: icon || '',
         titleName: title_property || 'Name',
-        properties: properties || [],
+        properties: (properties || []).map(toProperty),
         views: (views || []).map(toView),
         markdown: description || '',
+        subItems: !!sub_items,
+        dependencies: !!dependencies,
       });
       return out({ created: true, ...db, url: await urlOf(db.id) });
     },
@@ -489,7 +556,7 @@ export function createMcpServer(api, opts = {}) {
     {
       title: 'Change database schema',
       description:
-        'Rename the database, add / rename / retype / remove properties, and manage select options. Renaming keeps all values and views working (they use stable ids). Changing a type converts values where possible.',
+        'Rename the database, add / rename / retype / remove properties (with all the settings create_database takes), manage select and status options, and turn sub-items or dependencies on or off. Renaming keeps values, formulas and views working (they use stable ids). Changing a type converts values where possible. Example: add_properties [{"name":"Progress","type":"rollup","relation":"Subtasks","property":"Status","function":"percent_where","value":"@complete","display":"bar"}].',
       inputSchema: {
         database_id: dbId,
         title: z.string().optional(),
@@ -500,8 +567,18 @@ export function createMcpServer(api, opts = {}) {
             z.object({
               property: z.string().describe('Current name or id'),
               name: z.string().optional().describe('New name'),
-              type: z.enum([...PROPERTY_TYPES, 'status']).optional(),
-              add_options: z.array(z.string()).optional(),
+              type: z.enum(PROPERTY_TYPES).optional().describe('Change the type; values are converted where possible. Relation / rollup / formula need their settings below.'),
+              add_options: z.array(optionSpec).optional(),
+              option_groups: z.record(z.string(), z.enum(['todo', 'in_progress', 'complete'])).optional().describe('Status: {"Waiting on owner": "in_progress"}'),
+              expression: z.string().optional().describe('formula expression'),
+              relation: z.string().optional().describe('rollup: relation property'),
+              rollup_property: z.string().optional().describe('rollup: property of the related items'),
+              function: z.enum(ROLLUP_FUNCTIONS).optional().describe('rollup function'),
+              value: z.string().optional().describe('rollup: value for count_where / percent_where'),
+              database_id: z.string().optional().describe('relation target (when changing the type to relation)'),
+              format: z.enum(NUMBER_FORMATS).optional(),
+              display: z.enum(['number', 'bar', 'ring']).optional(),
+              prefix: z.string().optional().describe('unique_id prefix'),
               rename_options: z.record(z.string(), z.string()).optional().describe('{"Old name": "New name"}'),
               remove_options: z.array(z.string()).optional(),
               option_order: z.array(z.string()).optional().describe('Option names in the order to show (also board column order)'),
@@ -510,15 +587,19 @@ export function createMcpServer(api, opts = {}) {
           )
           .optional(),
         remove_properties: z.array(z.string()).optional(),
+        sub_items: z.boolean().optional().describe('true adds Parent item / Sub-items; false removes them'),
+        dependencies: z.boolean().optional().describe('true adds Blocked by / Blocking; false removes them'),
       },
       annotations: { destructiveHint: true },
     },
-    async ({ database_id, title, icon, add_properties, update_properties, remove_properties }) => {
+    async ({ database_id, title, icon, add_properties, update_properties, remove_properties, sub_items, dependencies }) => {
       const db = await api.call('updateDatabase', {
         pageId: database_id,
         title,
         icon,
-        addProperties: add_properties || [],
+        addProperties: (add_properties || []).map(toProperty),
+        subItems: sub_items,
+        dependencies,
         updateProperties: (update_properties || []).map((u) => ({
           property: u.property,
           name: u.name,
@@ -528,6 +609,16 @@ export function createMcpServer(api, opts = {}) {
           removeOptions: u.remove_options,
           optionOrder: u.option_order,
           optionColors: u.option_colors,
+          optionGroups: u.option_groups,
+          expression: u.expression,
+          relation: u.relation,
+          rollupProperty: u.rollup_property,
+          function: u.function,
+          value: u.value,
+          databaseId: u.database_id,
+          format: u.format,
+          display: u.display,
+          prefix: u.prefix,
         })),
         removeProperties: remove_properties || [],
       });
@@ -547,8 +638,10 @@ export function createMcpServer(api, opts = {}) {
           .array(
             z.object({
               properties: propValues,
-              content: z.string().optional().describe("Markdown for the item's page body"),
+              content: z.string().optional().describe("Markdown for the item's page body (instead of the template's)"),
               icon: z.string().optional(),
+              template: z.string().optional().describe('Template name or id; "none" skips the default template'),
+              parent_item_id: z.string().optional().describe('Make it a sub-item of this item (databases with sub_items)'),
             }),
           )
           .min(1)
@@ -560,7 +653,7 @@ export function createMcpServer(api, opts = {}) {
       const r = await api.call('createRows', {
         pageId: database_id,
         idempotencyKey: idempotency_key || null,
-        items: items.map((i) => ({ properties: i.properties, markdown: i.content || '', icon: i.icon || '' })),
+        items: items.map((i) => defined({ properties: i.properties, markdown: i.content || '', icon: i.icon || '', template: i.template, parentItemId: i.parent_item_id })),
       });
       return out({ ...r, results: await withUrls(r.results) });
     },
@@ -577,14 +670,28 @@ export function createMcpServer(api, opts = {}) {
         view: z.string().optional().describe('Saved view name or id'),
         filters: filterSchema.optional(),
         sorts: sortSchema.optional(),
-        search: z.string().optional().describe('Text to find in titles and text / select / person values'),
+        search: z.string().optional().describe('Text to find in titles and text / select / person / relation values'),
         limit: z.number().int().min(1).max(200).optional(),
         cursor: z.string().optional(),
+        aggregations: z.record(z.string(), z.enum(AGGREGATIONS)).optional().describe("Totals over all matching items, e.g. {\"Credits\": \"sum\", \"Status\": \"percent_checked\"} (default: the view's)"),
+        context_page_id: z.string().optional().describe('The page "@this_page" filter values refer to'),
+        parent_item_id: z.string().optional().describe('Only the sub-items of this item'),
       },
       annotations: { readOnlyHint: true },
     },
-    async ({ database_id, view, filters, sorts, search, limit, cursor }) => {
-      const r = await api.call('queryDatabase', { pageId: database_id, viewId: view || null, filters: filters || [], sorts: sorts || null, search: search || '', limit: limit || 50, cursor: cursor || null });
+    async ({ database_id, view, filters, sorts, search, limit, cursor, aggregations, context_page_id, parent_item_id }) => {
+      const r = await api.call('queryDatabase', {
+        pageId: database_id,
+        viewId: view || null,
+        filters: filters || [],
+        sorts: sorts || null,
+        search: search || '',
+        limit: limit || 50,
+        cursor: cursor || null,
+        aggregations: aggregations || null,
+        contextPageId: context_page_id || null,
+        parentItemId: parent_item_id || null,
+      });
       return out({ ...r, items: await withUrls(r.items) });
     },
   );
@@ -652,31 +759,26 @@ export function createMcpServer(api, opts = {}) {
     {
       title: 'Show a database inside a page',
       description:
-        'Embed a live view of a database in another page: a table or board with its own filters, sorts and columns, over the same records (no copies). Example: on each stage page, a table of that stage\'s tasks with filters [{"property":"Stage","operator":"equals","value":"01 · Business & Feasibility"}]. Items created from the view get the filtered values. Placed at the end of the page or right after after_block_id. Remove it with delete_blocks.',
+        'Embed a live view of a database in another page (table, board, list, gallery, calendar or timeline) with its own filters, sorts and columns, over the same records (no copies). Use "@this_page" as a filter value for the page it sits on, e.g. on an epic page filters [{"property":"Epic","operator":"contains","value":"@this_page"}]; it survives renames and duplication. Example: on each stage page, a table of that stage\'s tasks with filters [{"property":"Stage","operator":"equals","value":"01 · Business & Feasibility"}]. Items created from the view get the filtered values. Placed at the end of the page or right after after_block_id. Remove it with delete_blocks.',
       inputSchema: {
         parent_page_id: z.string().describe('Page to show the view on'),
         database_id: dbId,
         name: z.string().optional().describe('View title shown above it (default: database title)'),
-        view_type: z.enum(['table', 'board']).optional(),
+        view_type: z.enum(VIEW_TYPES).optional(),
         group_by: viewSpec.group_by,
         filters: filterSchema.optional(),
         sorts: sortSchema.optional(),
         visible_properties: viewSpec.visible_properties,
+        date_property: viewSpec.date_property,
+        end_property: viewSpec.end_property,
+        cover_property: viewSpec.cover_property,
+        card_size: viewSpec.card_size,
+        aggregations: viewSpec.aggregations,
         after_block_id: z.string().optional().describe('Insert right after this block of the page (ids from get_page format "blocks")'),
       },
     },
-    async ({ parent_page_id, database_id, name, view_type, group_by, filters, sorts, visible_properties, after_block_id }) => {
-      const r = await api.call('createLinkedView', {
-        pageId: parent_page_id,
-        databaseId: database_id,
-        afterBlockId: after_block_id || null,
-        name,
-        type: view_type,
-        groupBy: group_by,
-        filters,
-        sorts,
-        visibleProperties: visible_properties,
-      });
+    async ({ parent_page_id, database_id, view_type, after_block_id, ...v }) => {
+      const r = await api.call('createLinkedView', { pageId: parent_page_id, databaseId: database_id, afterBlockId: after_block_id || null, ...toView({ ...v, type: view_type }) });
       return out({ created: true, ...r, url: await urlOf(parent_page_id) });
     },
   );
@@ -690,17 +792,217 @@ export function createMcpServer(api, opts = {}) {
         page_id: pageId,
         block_id: z.string(),
         name: z.string().optional(),
-        view_type: z.enum(['table', 'board']).optional(),
+        view_type: z.enum(VIEW_TYPES).optional(),
         group_by: viewSpec.group_by,
         filters: filterSchema.optional(),
         sorts: sortSchema.optional(),
         visible_properties: viewSpec.visible_properties,
+        date_property: viewSpec.date_property,
+        end_property: viewSpec.end_property,
+        cover_property: viewSpec.cover_property,
+        card_size: viewSpec.card_size,
+        aggregations: viewSpec.aggregations,
       },
     },
-    async ({ page_id, block_id, name, view_type, group_by, filters, sorts, visible_properties }) => {
-      const r = await api.call('updateLinkedView', { pageId: page_id, blockId: block_id, name, type: view_type, groupBy: group_by, filters, sorts, visibleProperties: visible_properties });
+    async ({ page_id, block_id, view_type, ...v }) => {
+      const r = await api.call('updateLinkedView', { pageId: page_id, blockId: block_id, ...toView({ ...v, type: view_type }) });
       return out({ updated: true, ...r, url: await urlOf(page_id) });
     },
+  );
+
+
+  tool(
+    'upsert_database_items',
+    {
+      title: 'Create or update items by key',
+      description:
+        'Sync up to 300 items into a database by a key property (e.g. match_property "Code" with items whose Code is "GEN"): matching items are updated, missing ones are created, identical ones are left alone. No need to look up item ids first. Results per item: created / updated / unchanged / failed.',
+      inputSchema: {
+        database_id: dbId,
+        match_property: z.string().describe('Property that identifies an item: title, text, number, select, status, url, email or unique_id'),
+        items: z
+          .array(
+            z.object({
+              properties: propValues.describe('Must include the match property'),
+              content: z.string().optional().describe('Markdown body; replaces the body when different'),
+              icon: z.string().optional(),
+            }),
+          )
+          .min(1)
+          .max(300),
+      },
+    },
+    async ({ database_id, match_property, items }) => {
+      const r = await api.call('upsertRows', {
+        pageId: database_id,
+        matchProperty: match_property,
+        items: items.map((i) => defined({ properties: i.properties, markdown: i.content, icon: i.icon })),
+      });
+      return out({ ...r, results: await withUrls(r.results) });
+    },
+  );
+
+  tool(
+    'save_database_template',
+    {
+      title: 'Create / change an item template',
+      description:
+        'Item templates give new items a title, icon, default property values, Markdown content and linked database views (use "@this_page" in their filters, e.g. a Subtasks table filtered by Epic contains @this_page). The default template applies to every new item (pass template "none" when creating to skip it). Omit template to create one; from_item_id copies an existing item; remove: true deletes. get_database lists templates.',
+      inputSchema: {
+        database_id: dbId,
+        template: z.string().optional().describe('Existing template name or id to change'),
+        name: z.string().optional(),
+        title: z.string().optional().describe('Title new items get'),
+        icon: z.string().optional(),
+        properties: propValues.optional().describe('Default values'),
+        content: z.string().optional().describe('Markdown body'),
+        linked_views: z
+          .array(
+            z.object({
+              database_id: z.string(),
+              name: z.string().optional(),
+              view_type: z.enum(VIEW_TYPES).optional(),
+              group_by: z.string().optional(),
+              filters: filterSchema.optional(),
+              sorts: sortSchema.optional(),
+              visible_properties: z.array(z.string()).optional(),
+            }),
+          )
+          .optional()
+          .describe('Linked database views added at the end of each new item'),
+        is_default: z.boolean().optional(),
+        from_item_id: z.string().optional().describe("Copy this item's values, content and linked views"),
+        remove: z.boolean().optional(),
+      },
+    },
+    async ({ database_id, template, linked_views, is_default, from_item_id, remove, content, ...rest }) => {
+      const r = await api.call(
+        'saveTemplate',
+        defined({
+          pageId: database_id,
+          templateId: template || null,
+          remove: !!remove,
+          ...rest,
+          markdown: content,
+          isDefault: is_default,
+          fromItemId: from_item_id,
+          linkedViews: linked_views?.map((v) => defined({ databaseId: v.database_id, name: v.name, type: v.view_type, groupBy: v.group_by, filters: v.filters, sorts: v.sorts, visibleProperties: v.visible_properties })),
+        }),
+      );
+      return out({ saved: !remove, databaseId: database_id, ...(r.templates ? r : { template: r }) });
+    },
+  );
+
+  // ======================================================================
+  // Comments
+  // ======================================================================
+  tool(
+    'list_comments',
+    {
+      title: 'Read comments',
+      description:
+        'Comment threads (first comment + replies) on one page or item, or across the workspace. Use unresolved_only to find open questions and answers, and since to see what is new since your last session. Each comment has its author (person or agent), text, mentions and time.',
+      inputSchema: {
+        page_id: z.string().optional().describe('Page or database item; omit for the whole workspace'),
+        unresolved_only: z.boolean().optional(),
+        since: z.string().optional().describe('ISO date-time: only threads with comments after it (workspace-wide listing)'),
+        limit: z.number().int().min(1).max(500).optional(),
+      },
+      annotations: { readOnlyHint: true },
+    },
+    async ({ page_id, unresolved_only, since, limit }) => {
+      const r = await api.call('listComments', { pageId: page_id || null, unresolvedOnly: !!unresolved_only, since: since || null, limit: limit || 100 });
+      const b = await base();
+      return out({ ...r, threads: r.threads.map((t) => ({ ...t, url: b ? `${b}#/${t.pageId}` : null })) });
+    },
+  );
+
+  tool(
+    'add_comment',
+    {
+      title: 'Comment',
+      description: 'Add a comment to a page or database item, or reply to a thread (reply_to = a comment id). Mention people with @Name. A reply reopens a resolved thread.',
+      inputSchema: {
+        page_id: z.string().optional().describe('Page or item to comment on (not needed for a reply)'),
+        text: z.string(),
+        reply_to: z.string().optional().describe('Comment id to reply to'),
+      },
+    },
+    async ({ page_id, text, reply_to }) => {
+      if (!page_id && !reply_to) throw new Error('Give page_id, or reply_to for a reply');
+      const c = await api.call('addComment', { pageId: page_id || null, text, parentId: reply_to || null });
+      return out({ created: true, comment: c, url: await urlOf(c.pageId) });
+    },
+  );
+
+  tool(
+    'resolve_comment',
+    {
+      title: 'Resolve comment thread',
+      description: 'Mark a comment thread resolved (or reopen it with resolved: false).',
+      inputSchema: { comment_id: z.string(), resolved: z.boolean().optional() },
+    },
+    async ({ comment_id, resolved }) => out(await api.call('resolveComment', { commentId: comment_id, resolved: resolved !== false })),
+  );
+
+  // ======================================================================
+  // Changes & webhooks
+  // ======================================================================
+  tool(
+    'list_changes',
+    {
+      title: 'What changed',
+      description:
+        'Pages, databases and items changed after a time (oldest first), with who edited them and, for items, their current values. Use it at the start of a session to catch up on what people did in the app (e.g. tasks marked Done).',
+      inputSchema: {
+        since: z.string().describe('ISO date-time, e.g. 2026-11-09T18:00:00Z'),
+        database_id: z.string().optional().describe('Only this database and its items'),
+        limit: z.number().int().min(1).max(500).optional().describe('Default 100 (the most recent ones if there are more)'),
+      },
+      annotations: { readOnlyHint: true },
+    },
+    async ({ since, database_id, limit }) => {
+      const r = await api.call('listChanges', { since, databaseId: database_id || null, limit: limit || 100 });
+      return out({ ...r, changes: await withUrls(r.changes) });
+    },
+  );
+
+  tool(
+    'list_webhooks',
+    {
+      title: 'List webhooks',
+      description: 'Webhooks of this workspace with their events and last delivery status.',
+      inputSchema: {},
+      annotations: { readOnlyHint: true },
+    },
+    async () => out({ webhooks: await api.call('listWebhooks', {}) }),
+  );
+
+  tool(
+    'create_webhook',
+    {
+      title: 'Create webhook',
+      description:
+        'POST a JSON list of events to an https URL whenever things change: item.updated (with the changed properties, e.g. Status from "In progress" to "Done"), item.created, item.archived, page.*, database.*, comment.added, comment.resolved, or "*". Optionally only for one database. Each request is signed: X-Webhook-Signature = "sha256=" + HMAC-SHA256(secret, timestamp + "." + body), with X-Webhook-Timestamp. The secret is only shown in this result.',
+      inputSchema: {
+        url: z.string().describe('https:// endpoint'),
+        events: z.array(z.string()).optional().describe('Default ["*"]'),
+        database_id: z.string().optional(),
+        description: z.string().optional(),
+      },
+    },
+    async ({ url, events, database_id, description }) => out({ created: true, webhook: await api.call('createWebhook', defined({ url, events, databaseId: database_id, description })) }),
+  );
+
+  tool(
+    'delete_webhook',
+    {
+      title: 'Delete webhook',
+      description: 'Stop a webhook.',
+      inputSchema: { webhook_id: z.string() },
+      annotations: { destructiveHint: true },
+    },
+    async ({ webhook_id }) => out(await api.call('deleteWebhook', { webhookId: webhook_id })),
   );
 
   return server;

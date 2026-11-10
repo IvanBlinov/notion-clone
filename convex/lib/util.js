@@ -1,6 +1,7 @@
 import { ConvexError } from 'convex/values';
 import { WorkspaceModel } from '../../src/shared/model.js';
 import { sha256 } from './sha256.js';
+import { emitEvents, pageEvents } from '../webhooks.js';
 
 export const DAY = 86400_000;
 export const COLORS = ['#e16259', '#d9730d', '#cb912f', '#448361', '#337ea9', '#9065b0', '#c14c8a', '#2e7d7a'];
@@ -102,17 +103,27 @@ export async function loadWorkspace(ctx, workspaceId) {
     before.set(pid, JSON.stringify(pages[pid]));
   }
   const model = new WorkspaceModel(pages, await workspaceMembers(ctx, workspaceId));
-  async function commit() {
+  /** opts.actor: who made the change (for webhook events). */
+  async function commit(opts = {}) {
     const now = model.data.pages;
+    const changed = [];
     for (const [pid, p] of Object.entries(now)) {
       const json = JSON.stringify(p);
       if (rowId.has(pid) && before.get(pid) === json) continue;
+      changed.push({ pid, old: rowId.has(pid) ? JSON.parse(before.get(pid)) : null, now: p });
       const { id, ...fields } = JSON.parse(json); // drops undefined values
       const row = { workspaceId, pid, ...fields };
       if (rowId.has(pid)) await ctx.db.replace(rowId.get(pid), row);
       else await ctx.db.insert('pages', row);
     }
-    for (const [pid, id] of rowId) if (!now[pid]) await ctx.db.delete(id);
+    for (const [pid, id] of rowId) {
+      if (now[pid]) continue;
+      await ctx.db.delete(id);
+      changed.push({ pid, old: JSON.parse(before.get(pid)), now: null });
+    }
+    if (changed.length && ctx.scheduler && (await ctx.db.query('webhooks').withIndex('by_workspace', (q) => q.eq('workspaceId', workspaceId)).first())) {
+      await emitEvents(ctx, workspaceId, pageEvents(model, changed, opts.actor));
+    }
   }
   return { model, commit };
 }
@@ -128,8 +139,18 @@ export async function workspaceMembers(ctx, workspaceId) {
     const u = await ctx.db.get(m.userId);
     if (u) out.push({ id: u._id, name: u.name, email: u.email, color: u.color, role: m.role });
   }
+  // AI agents (one per agent token) can be assigned in person properties too
+  const tokens = await ctx.db
+    .query('agentTokens')
+    .withIndex('by_workspace_user', (q) => q.eq('workspaceId', workspaceId))
+    .collect();
+  for (const t of tokens) {
+    if (!out.some((m) => m.id === t.userId)) continue;
+    out.push({ id: agentMemberId(t._id), name: t.name, email: null, color: '#9065b0', role: 'agent', kind: 'agent' });
+  }
   return out;
 }
+export const agentMemberId = (tokenId) => `agent_${tokenId}`;
 
 /** Run a model operation, turning its errors into client-readable ones. */
 export function runModel(fn) {

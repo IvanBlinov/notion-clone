@@ -49,6 +49,8 @@ export const remove = mutation({
       ...(await byWs('invites', 'by_workspace')),
       ...(await byWs('agentTokens', 'by_workspace_user')),
       ...(await byWs('presence', 'by_workspace')),
+      ...(await byWs('comments', 'by_workspace')),
+      ...(await byWs('webhooks', 'by_workspace')),
     ]) {
       await ctx.db.delete(row._id);
     }
@@ -324,6 +326,18 @@ export const insertAgentToken = internalMutation({
     const user = await requireUser(ctx, session);
     await requireMember(ctx, workspaceId, user._id);
     await ctx.db.insert('agentTokens', { workspaceId, userId: user._id, name: String(name || 'Agent').slice(0, 60), tokenHash, createdAt: Date.now(), lastUsedAt: null });
+  },
+});
+
+export const renameAgentToken = mutation({
+  args: { session: v.string(), tokenId: v.id('agentTokens'), name: v.string() },
+  handler: async (ctx, { session, tokenId, name }) => {
+    const user = await requireUser(ctx, session);
+    const t = await ctx.db.get(tokenId);
+    if (!t || t.userId !== user._id) fail(404, 'Token not found');
+    const n = String(name).trim().slice(0, 60);
+    if (!n) fail(400, 'Name is required');
+    await ctx.db.patch(tokenId, { name: n });
   },
 });
 

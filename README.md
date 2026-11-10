@@ -4,6 +4,8 @@ A Notion-style workspace with an **MCP server for AI agents**. The front end is 
 
 - Nested pages that also show up as blocks inside their parent, a block editor with a `/` menu, Markdown shortcuts, drag & drop, search, favorites and a Trash
 - Accounts, multiple workspaces, **invite links**, members, live co-editing and "who's here" avatars
+- Databases with relations (two-way), rollups, formulas, status groups, files, links, unique ids, sub-items and dependencies; table, board, list, gallery, calendar and timeline views; footer calculations and item templates
+- Comments with @mentions (people and AI agents), outgoing webhooks, and a change feed for agents
 - An MCP endpoint (`https://<deployment>.convex.site/mcp`) so agents can list, read, create, edit, move and trash pages with personal agent tokens
 
 ## How it fits together
@@ -86,12 +88,17 @@ For stdio-only clients (Claude Desktop) run the bridge from a checkout of this r
 | `replace_page_content` / `append_content` | Write Markdown; `expected_version` refuses to overwrite newer edits |
 | `update_block` / `delete_blocks` / `move_block` | Precise block edits (deleting a sub-page block trashes that page) |
 | `archive_page` / `restore_page` | Trash and restore. Agents can't delete pages permanently |
-| `create_database` / `get_database` / `update_database` | Databases with typed properties: text, number, checkbox, select / status, multi-select, date, person, URL, email |
-| `create_database_items` | Up to 300 items per call, with `idempotency_key` so retries never duplicate; per-item results |
-| `query_database` | Filters (AND / OR, `me`, relative dates like `+7d`), sorts, text search, pagination, saved views |
+| `create_database` / `get_database` / `update_database` | Databases with typed properties: text, number, checkbox, select, status (To-do / In progress / Complete groups), multi-select, date (with time and ranges), person (people and AI agents), relation (one- or two-way), rollup, formula, files, links, URL, email, unique id; sub-items and dependencies (Blocked by / Blocking, "Is blocked") |
+| `create_database_items` | Up to 300 items per call, with `idempotency_key` so retries never duplicate; templates; sub-items (`parent_item_id`); per-item results |
+| `upsert_database_items` | Sync items by a key property: update matches, create the missing, leave identical ones alone |
+| `query_database` | Filters (AND / OR, `me`, relative dates like `+7d`, status groups, `@this_page`), sorts, text search, pagination, saved views, totals (sum, average, percent checked…) |
 | `update_database_items` / `archive_database_items` | Bulk changes, reported per item |
-| `save_database_view` | Saved table and board (Kanban) views with filters, sorts, grouping and visible columns |
-| `create_linked_database_view` / `update_linked_database_view` | Show a database inside any page as a live, filtered table or board (e.g. each stage page shows only its tasks); same records, no copies |
+| `save_database_view` | Saved table, board, list, gallery, calendar and timeline views with filters, sorts, grouping, columns and footer calculations |
+| `save_database_template` | Item templates: content, default values and linked views (`@this_page` filters), a default one for new items |
+| `create_linked_database_view` / `update_linked_database_view` | Show a database inside any page as a live, filtered table or board (e.g. each stage page shows only its tasks); same records, no copies. Filter value `@this_page` = the page it sits on |
+| `list_comments` / `add_comment` / `resolve_comment` | Comment threads on pages and items, with @mentions; unresolved / since filters |
+| `list_changes` | Pages and items changed since a time, with who edited them and current values |
+| `create_webhook` / `list_webhooks` / `delete_webhook` | Signed POSTs (HMAC-SHA256) on item / page / comment events, optionally for one database |
 
 Every result is structured JSON (`structuredContent`) with ids and a `url` that opens the page in the app.
 
