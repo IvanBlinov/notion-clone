@@ -375,6 +375,137 @@ step('databases: 187 items in one call, idempotent retry, filters/sorts/paginati
 }
 step('tracker features: relations, rollups, formulas, upsert, @this_page, templates, status groups, sub-items, dependencies, date-times, files/links, aggregations, comments, changes, webhooks, agent member');
 
+// ---------- migration issues: retype keeps options, two_way on update, stored files + thumbnails, event feed ----------
+{
+  const { PNG } = await import('pngjs');
+  const m = new Client({ name: 'smoke-migration', version: '1' });
+  await m.connect(new StreamableHTTPClientTransport(new URL(`${SITE}/mcp`), { requestInit: { headers: { Authorization: `Bearer ${token}` } } }));
+  const J = async (name, args) => {
+    const r = await call(m, name, args);
+    if (r.isError) throw new Error(`${name}: ${txt(r)}`);
+    return r.structuredContent;
+  };
+  const fails = async (name, args, re) => {
+    const r = await call(m, name, args);
+    assert.equal(r.isError, true, `${name} should fail`);
+    if (re) assert.match(txt(r), re);
+  };
+  const hub = (await J('create_page', { title: 'Migration' })).id;
+
+  // 1. select → status keeps every option and groups them by name (option_groups wins)
+  const ep = await J('create_database', { title: 'Epics M', parent_id: hub, properties: [{ name: 'Code', type: 'text' }] });
+  const tk = await J('create_database', {
+    title: 'Tasks M',
+    parent_id: hub,
+    properties: [
+      { name: 'Status', type: 'select', options: ['Not started', 'In progress', 'Waiting on owner', 'Blocked', 'Done', 'Parked'] },
+      { name: 'Epic', type: 'select' },
+    ],
+  });
+  await J('create_database_items', { database_id: ep.id, items: [{ properties: { Name: 'E01 Reader' } }, { properties: { Name: 'E02 Shop' } }] });
+  const made = await J('create_database_items', {
+    database_id: tk.id,
+    items: [
+      { properties: { Name: 'a', Status: 'In progress', Epic: 'E01 Reader' } },
+      { properties: { Name: 'b', Status: 'Done', Epic: 'E01 Reader' } },
+      { properties: { Name: 'c', Status: 'In progress', Epic: 'E02 Shop' } },
+    ],
+  });
+  let s1 = await J('update_database', { database_id: tk.id, update_properties: [{ property: 'Status', type: 'status', option_groups: { Parked: 'complete' } }] });
+  const st = s1.properties.find((p) => p.name === 'Status');
+  assert.equal(st.type, 'status');
+  const grp = Object.fromEntries(st.options.map((o) => [o.name, o.group]));
+  assert.deepEqual(grp, { 'Not started': 'todo', 'In progress': 'in_progress', 'Waiting on owner': 'in_progress', Blocked: 'in_progress', Done: 'complete', Parked: 'complete' });
+  let q = await J('query_database', { database_id: tk.id, filters: [{ property: 'Status', operator: 'in_group', value: 'in_progress' }] });
+  assert.equal(q.total ?? q.items.length, 2);
+  await J('update_database_items', { database_id: tk.id, updates: [{ item_id: made.results[0].id, properties: { Status: 'Waiting on owner' } }] }); // usable right away
+
+  // 2. two_way on update: select → two-way relation in one call, then rename, drop and re-add the reverse side
+  s1 = await J('update_database', { database_id: tk.id, update_properties: [{ property: 'Epic', type: 'relation', database_id: ep.id, two_way: true, reverse_name: 'Subtasks' }] });
+  assert.equal(s1.properties.find((p) => p.name === 'Epic').reverseProperty, 'Subtasks');
+  const epRows = async () => (await J('query_database', { database_id: ep.id })).items;
+  const subtasksOf = (rows, title) => rows.find((r) => r.title === title).properties.Subtasks.map((x) => x.title ?? x).sort();
+  assert.deepEqual(subtasksOf(await epRows(), 'E01 Reader'), ['a', 'b']);
+  assert.deepEqual(subtasksOf(await epRows(), 'E02 Shop'), ['c']);
+  await J('update_database', { database_id: tk.id, update_properties: [{ property: 'Epic', reverse_name: 'Children' }] });
+  assert.ok((await J('get_database', { database_id: ep.id })).properties.some((p) => p.name === 'Children'));
+  await J('update_database', { database_id: tk.id, update_properties: [{ property: 'Epic', two_way: false }] });
+  assert.ok(!(await J('get_database', { database_id: ep.id })).properties.some((p) => p.type === 'relation'));
+  assert.equal((await J('get_database', { database_id: tk.id })).properties.find((p) => p.name === 'Epic').reverseProperty, undefined);
+  await J('update_database', { database_id: tk.id, update_properties: [{ property: 'Epic', two_way: true, reverse_name: 'Subtasks' }] });
+  assert.deepEqual(subtasksOf(await epRows(), 'E01 Reader'), ['a', 'b']); // filled from the existing links
+  await fails('update_database', { database_id: tk.id, update_properties: [{ property: 'Status', two_way: true }] }, /relation/);
+
+  // 3. stored files with thumbnails
+  const pngOf = (w, hgt, alpha) => {
+    const p = new PNG({ width: w, height: hgt });
+    for (let i = 0; i < w * hgt; i++) p.data.set([(i * 7) % 256, (i * 13) % 256, (i * 3) % 256, alpha ? (i % 2 ? 0 : 255) : 255], i * 4);
+    return PNG.sync.write(p);
+  };
+  const big = pngOf(1200, 800, false);
+  const imp = await J('import_files', { files: [{ data_base64: big.toString('base64'), name: 'look.png', key: 'look:1:v1' }, { url: 'http://127.0.0.1:3211/secret' }, { data_base64: pngOf(900, 900, true).toString('base64'), name: 'cutout.png' }] });
+  const [f1, bad1, f3] = imp.files;
+  assert.equal(f1.ok, true, JSON.stringify(f1));
+  assert.equal(f1.width, 1200);
+  assert.ok(f1.thumbnail && f1.thumbnail !== f1.url);
+  const th = await fetch(f1.thumbnail);
+  assert.equal(th.headers.get('content-type'), 'image/jpeg');
+  assert.ok((await th.arrayBuffer()).byteLength < big.length / 4);
+  assert.equal(bad1.ok, false);
+  assert.match(bad1.error, /reachable|Private/);
+  const t3 = await fetch(f3.thumbnail);
+  assert.equal(t3.headers.get('content-type'), 'image/png'); // transparency kept
+  const thumbPng = PNG.sync.read(Buffer.from(await t3.arrayBuffer()));
+  assert.equal(Math.max(thumbPng.width, thumbPng.height), 480);
+  const again = await J('import_files', { files: [{ key: 'look:1:v1' }, { data_base64: big.toString('base64') }] });
+  assert.ok(again.files.every((f) => f.ok && f.reused && f.url === f1.url)); // by key without data, and by content
+  await J('update_database', { database_id: tk.id, add_properties: [{ name: 'Looks', type: 'files' }] });
+  const withFile = await J('update_database_items', { database_id: tk.id, updates: [{ item_id: made.results[1].id, properties: { Looks: [{ data_base64: big.toString('base64'), name: 'front.png', import: true }] } }] });
+  assert.ok(withFile.results.every((r) => r.ok !== false));
+  const looks = (await J('query_database', { database_id: tk.id })).items.find((r) => r.title === 'b').properties.Looks;
+  assert.equal(JSON.stringify(looks).includes(f1.thumbnail), true, JSON.stringify(looks));
+  await fails('update_database_items', { database_id: tk.id, updates: [{ item_id: made.results[1].id, properties: { Looks: [{ url: 'https://localhost/x.png', import: true }] } }] }, /reachable/);
+  // the browser: upload, then finishUpload stores the record and thumbnail
+  const upUrl = await c.mutation(api.files.uploadUrl, A);
+  const { storageId } = await (await fetch(upUrl, { method: 'POST', headers: { 'Content-Type': 'image/png' }, body: pngOf(1000, 600, false) })).json();
+  const up = await c.action(api.fileImport.finishUpload, { ...A, storageId, name: 'drop.png' });
+  assert.ok(up.thumbnail && up.url && up.name === 'drop.png');
+
+  // 4. the event feed: cursor, filters, exclude_self, waiting
+  const first = await J('list_events', {});
+  assert.equal(typeof first.cursor, 'number');
+  const rowB = made.results[1].id;
+  await c.mutation(api.pages.run, { ...A, method: 'updateRows', args: { updates: [{ itemId: rowB, properties: { Status: 'In progress' } }] } });
+  await J('update_database_items', { database_id: tk.id, updates: [{ item_id: rowB, properties: { Name: 'b2' } }] }); // the agent's own edit
+  const ev = await J('list_events', { cursor: first.cursor, database_id: tk.id, properties: ['Status'] });
+  assert.equal(ev.events.length, 1);
+  assert.equal(ev.events[0].event, 'item.updated');
+  assert.deepEqual(ev.events[0].changes.Status, { from: 'Done', to: 'In progress' });
+  assert.equal(ev.events[0].actor, 'Alice');
+  assert.ok(ev.events[0].url);
+  const mine = await J('list_events', { cursor: first.cursor, database_id: tk.id, exclude_self: true });
+  assert.ok(mine.events.length >= 1 && mine.events.every((e) => e.actor === 'Alice'));
+  const none = await J('list_events', { cursor: ev.cursor, types: ['comment.*'] });
+  assert.equal(none.events.length, 0);
+  const t0 = Date.now();
+  const waiting = J('list_events', { cursor: ev.cursor, types: ['comment.added'], wait_seconds: 20 });
+  await new Promise((r) => setTimeout(r, 1500));
+  await c.mutation(api.comments.add, { ...A, pageId: rowB, text: 'Approved, go ahead' });
+  const woke = await waiting;
+  assert.equal(woke.events.length, 1);
+  assert.equal(woke.events[0].comment.text, 'Approved, go ahead');
+  assert.ok(Date.now() - t0 < 15000);
+  assert.ok(woke.cursor > ev.cursor);
+  const quiet = Date.now();
+  const empty = await J('list_events', { cursor: woke.cursor, wait_seconds: 2 });
+  assert.equal(empty.events.length, 0);
+  assert.ok(Date.now() - quiet >= 1900);
+  const since = await J('list_events', { since: new Date(t0 - 60000).toISOString(), types: ['comment.added'] });
+  assert.ok(since.events.some((e) => e.comment?.text === 'Approved, go ahead'));
+  await m.close();
+}
+step('migration issues: select → status keeps options, two_way on update, stored files with thumbnails, event feed with cursor and waiting');
+
 // ---------- stdio bridge ----------
 const stdio = new Client({ name: 'smoke-stdio', version: '1' });
 await stdio.connect(new StdioClientTransport({ command: process.execPath, args: [path.join(root, 'src', 'mcp-stdio.js')], env: { ...process.env, NOTION_URL: SITE, NOTION_TOKEN: token }, stderr: 'ignore' }));

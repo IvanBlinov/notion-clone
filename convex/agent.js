@@ -4,6 +4,7 @@ import { fail, loadWorkspace, membership, runModel, workspaceMembers, agentMembe
 import { sha256 } from './lib/sha256.js';
 import { listComments, addComment, resolveComment } from './comments.js';
 import { listHooks, createHook, deleteHook } from './webhooks.js';
+import { listEvents, latestSeq } from './events.js';
 
 // Agents may read and edit, but never permanently delete.
 const AGENT_METHODS = new Set([
@@ -56,6 +57,21 @@ export const check = internalQuery({
   handler: async (ctx, { token }) => !!(await tokenRecord(ctx, token)),
 });
 
+/** Latest change-feed number of the token's workspace (cheap check while waiting for changes). */
+export const feedSeq = internalQuery({
+  args: { token: v.string() },
+  handler: async (ctx, { token }) => {
+    const t = await tokenRecord(ctx, token);
+    return t ? latestSeq(ctx, t.workspaceId) : null;
+  },
+});
+
+/** Workspace of a valid agent token (for file imports). */
+export const tokenWorkspace = internalQuery({
+  args: { token: v.string() },
+  handler: async (ctx, { token }) => (await tokenRecord(ctx, token))?.workspaceId ?? null,
+});
+
 /** Run one page-model method (or comment / webhook call) on behalf of an agent token. */
 export const call = internalMutation({
   args: { token: v.string(), method: v.string(), args: v.any(), tool: v.optional(v.string()) },
@@ -67,7 +83,7 @@ export const call = internalMutation({
     const a = args || {};
     const done = async (result) => {
       await ctx.db.patch(t._id, { lastUsedAt: Date.now() });
-      if (!READ_ONLY.has(method) && !['getContext', 'listComments', 'listWebhooks'].includes(method)) await ctx.db.patch(t.workspaceId, { lastAgentAt: Date.now(), ...(tool ? { lastAgentTool: tool } : {}) });
+      if (!READ_ONLY.has(method) && !['getContext', 'listComments', 'listWebhooks', 'listEvents'].includes(method)) await ctx.db.patch(t.workspaceId, { lastAgentAt: Date.now(), ...(tool ? { lastAgentTool: tool } : {}) });
       return result ?? null;
     };
     switch (method) {
@@ -96,13 +112,15 @@ export const call = internalMutation({
       case 'createWebhook':
         if (!/^whsec_[0-9a-f]{48}$/.test(String(a.secret || ''))) fail(400, 'Missing webhook secret');
         return done(await createHook(ctx, t.workspaceId, a, agent.name));
+      case 'listEvents':
+        return done(await listEvents(ctx, t.workspaceId, { ...a, excludeActorId: a.excludeSelf ? agent.id : undefined }));
       case 'deleteWebhook':
         return done(await deleteHook(ctx, t.workspaceId, a.webhookId));
     }
     if (!AGENT_METHODS.has(method)) fail(400, `Unknown method ${method}`);
     const { model, commit } = await loadWorkspace(ctx, t.workspaceId);
     const result = runModel(() => model[method](a, { client: 'agent', kind: 'agent', name: agent.name, userId: user._id, agentId: agent.id }));
-    await commit({ actor: agent.name });
+    await commit({ actor: agent.name, actorId: agent.id });
     return done(result);
   },
 });

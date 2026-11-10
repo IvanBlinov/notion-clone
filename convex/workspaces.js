@@ -68,7 +68,18 @@ export const deletePages = internalMutation({
       .withIndex('by_workspace', (q) => q.eq('workspaceId', workspaceId))
       .take(200);
     for (const p of batch) await ctx.db.delete(p._id);
-    if (batch.length === 200) await ctx.scheduler.runAfter(0, internal.workspaces.deletePages, { workspaceId });
+    if (batch.length === 200) return void (await ctx.scheduler.runAfter(0, internal.workspaces.deletePages, { workspaceId }));
+    // then the change feed and stored files
+    const byWs = (table, index) => ctx.db.query(table).withIndex(index, (q) => q.eq('workspaceId', workspaceId)).take(200);
+    const events = [...(await byWs('events', 'by_seq')), ...(await byWs('eventSeq', 'by_workspace'))];
+    for (const e of events) await ctx.db.delete(e._id);
+    const files = events.length ? [] : await byWs('files', 'by_workspace');
+    for (const f of files) {
+      await ctx.storage.delete(f.storageId).catch(() => {});
+      if (f.thumbId) await ctx.storage.delete(f.thumbId).catch(() => {});
+      await ctx.db.delete(f._id);
+    }
+    if (events.length || files.length === 200) await ctx.scheduler.runAfter(0, internal.workspaces.deletePages, { workspaceId });
   },
 });
 

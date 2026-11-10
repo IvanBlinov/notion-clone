@@ -3,7 +3,7 @@
 import { v } from 'convex/values';
 import { query, mutation } from './_generated/server';
 import { fail, requireUser, requireMember, workspaceMembers } from './lib/util.js';
-import { emitEvents } from './webhooks.js';
+import { recordEvents } from './events.js';
 
 const MAX_TEXT = 5000;
 
@@ -121,7 +121,7 @@ export async function addComment(ctx, workspaceId, author, { pageId, text, paren
   if (thread?.resolved) await ctx.db.patch(thread._id, { resolved: false, resolvedBy: undefined }); // a reply reopens the thread
   const c = await ctx.db.get(id);
   const out = commentOut(c, members, page);
-  await emitEvents(ctx, workspaceId, [{ event: 'comment.added', at: out.createdAt, actor: author.name, page: { id: page.pid, title: page.title }, ...(page.parentId ? { databaseId: page.parentId } : {}), comment: out }]);
+  await recordEvents(ctx, workspaceId, [{ event: 'comment.added', at: out.createdAt, actor: author.name, ...(author.id ? { actorId: author.id } : {}), page: { id: page.pid, title: page.title }, ...(page.parentId ? { databaseId: page.parentId } : {}), comment: out }]);
   return out;
 }
 
@@ -132,7 +132,7 @@ export async function resolveComment(ctx, workspaceId, who, { commentId, resolve
   if (c.parentId) c = await ctx.db.get(c.parentId); // resolving a reply resolves its thread
   await ctx.db.patch(c._id, { resolved: !!resolved, resolvedBy: resolved ? who.name : undefined });
   const page = await pageDoc(ctx, workspaceId, c.pageId);
-  if (resolved) await emitEvents(ctx, workspaceId, [{ event: 'comment.resolved', at: new Date().toISOString(), actor: who.name, page: { id: c.pageId, title: page?.title ?? '' }, ...(page?.parentId ? { databaseId: page.parentId } : {}), comment: { id: c._id, text: c.text } }]);
+  if (resolved) await recordEvents(ctx, workspaceId, [{ event: 'comment.resolved', at: new Date().toISOString(), actor: who.name, ...(who.id ? { actorId: who.id } : {}), page: { id: c.pageId, title: page?.title ?? '' }, ...(page?.parentId ? { databaseId: page.parentId } : {}), comment: { id: c._id, text: c.text } }]);
   return { id: c._id, resolved: !!resolved };
 }
 
@@ -188,7 +188,7 @@ export const resolve = mutation({
   args: { session: v.string(), workspaceId: v.id('workspaces'), commentId: v.string(), resolved: v.boolean() },
   handler: async (ctx, { session, workspaceId, commentId, resolved }) => {
     const { user } = await open(ctx, session, workspaceId);
-    return resolveComment(ctx, workspaceId, { name: user.name }, { commentId, resolved });
+    return resolveComment(ctx, workspaceId, { id: user._id, name: user.name }, { commentId, resolved });
   },
 });
 

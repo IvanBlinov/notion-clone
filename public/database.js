@@ -309,8 +309,8 @@ function valueCell(ctx, row, prop, { compact = false } = {}) {
         'div',
         { class: `db-chips db-files${compact ? ' compact' : ''}`, role: 'button', tabindex: '0' },
         list.map((f) =>
-          prop.type === 'files' && /\.(png|jpe?g|gif|webp|svg|avif)(\?|$)/i.test(f.url) && compact
-            ? h('a', { class: 'db-thumb', href: f.url, target: '_blank', rel: 'noopener', title: f.name || f.url, onclick: (e) => e.stopPropagation() }, h('img', { src: f.url, alt: f.name || '', loading: 'lazy' }))
+          prop.type === 'files' && (f.thumbnail || /\.(png|jpe?g|gif|webp|svg|avif)(\?|$)/i.test(f.url)) && compact
+            ? h('a', { class: 'db-thumb', href: f.url, target: '_blank', rel: 'noopener', title: f.name || f.url, onclick: (e) => e.stopPropagation() }, h('img', { src: f.thumbnail || f.url, alt: f.name || '', loading: 'lazy', decoding: 'async' }))
             : h('a', { class: 'db-file', href: f.url, target: '_blank', rel: 'noopener', title: f.url, onclick: (e) => e.stopPropagation() }, prop.type === 'files' ? '📎 ' : '🔗 ', f.name || f.label || f.url.replace(/^https?:\/\/(www\.)?/, '').slice(0, 40)),
         ),
       );
@@ -551,7 +551,7 @@ function filesEditor(ctx, anchor, row, prop) {
               try {
                 deps.toast(`Uploading ${f.name}…`);
                 const r = await deps.upload(f);
-                list = [...list, { name: r.name, url: r.url, storageId: r.storageId }];
+                list = [...list, { name: r.name, url: r.url, ...(r.thumbnail ? { thumbnail: r.thumbnail } : {}), storageId: r.storageId }];
                 save();
                 draw();
               } catch (err) {
@@ -568,7 +568,7 @@ function filesEditor(ctx, anchor, row, prop) {
         h(
           'div',
           { class: 'db-editor-row' },
-          files && /\.(png|jpe?g|gif|webp|svg|avif)(\?|$)/i.test(f.url) ? h('img', { class: 'db-thumb-sm', src: f.url, alt: '' }) : h('span', { class: 'mi-icon' }, files ? '📎' : '🔗'),
+          files && (f.thumbnail || /\.(png|jpe?g|gif|webp|svg|avif)(\?|$)/i.test(f.url)) ? h('img', { class: 'db-thumb-sm', src: f.thumbnail || f.url, alt: '', loading: 'lazy' }) : h('span', { class: 'mi-icon' }, files ? '📎' : '🔗'),
           h('a', { class: 'grow db-file-name', href: f.url, target: '_blank', rel: 'noopener' }, f.name || f.label || f.url),
           h('button', { class: 'icon-btn small', title: 'Remove', onclick: () => ((list = list.filter((_, j) => j !== i)), save(), draw()) }, '✕'),
         ),
@@ -1149,6 +1149,11 @@ export function createDatabaseView(pageId, deps, opts = {}) {
   function headerMenu(anchor, prop) {
     const isTitle = prop.type === 'title';
     const isPseudo = ['created_time', 'last_edited_time', 'blocked'].includes(prop.type);
+    // sub-items and dependencies are fixed pairs of self-relations
+    const structural = (p) => {
+      const d = data.database;
+      return [d.subItems?.children, d.subItems?.parent, d.dependencies?.blockedBy, d.dependencies?.blocking].includes(p.id);
+    };
     const simple = PROPERTY_TYPES.filter((t) => !['relation', 'rollup', 'formula'].includes(t));
     const editSettings = (type) => {
       const form = configForm(type, prop.type === 'formula' ? { ...prop, expressionText: expressionOf(prop) } : prop, (spec) => {
@@ -1196,6 +1201,11 @@ export function createDatabaseView(pageId, deps, opts = {}) {
           }
         : null,
       prop.type === 'relation' ? { label: `Links to ${data.related?.[prop.databaseId]?.title || (prop.databaseId === pageId ? 'this database' : 'another database')}${prop.reverseId ? ' (two-way)' : ''}` } : null,
+      prop.type === 'relation' && !structural(prop)
+        ? prop.reverseId
+          ? { icon: '→', name: 'Make one-way', run: () => confirm(`Remove the other side of "${prop.name}" from the related database? The links on this side stay.`) && updateDb({ updateProperties: [{ property: prop.id, twoWay: false }] }) }
+          : { icon: '⇄', name: 'Make two-way…', run: () => deps.askInput(anchor, `Name of the property on ${data.related?.[prop.databaseId]?.title || 'the related database'}`, data.title || 'Related', (n) => updateDb({ updateProperties: [{ property: prop.id, twoWay: true, reverseName: n }] })) }
+        : null,
       { icon: '↑', name: 'Sort ascending', run: () => saveView({ sorts: [{ property: prop.id, direction: 'ascending' }] }) },
       { icon: '↓', name: 'Sort descending', run: () => saveView({ sorts: [{ property: prop.id, direction: 'descending' }] }) },
       !isTitle
@@ -1464,8 +1474,8 @@ export function createDatabaseView(pageId, deps, opts = {}) {
     const coverOf = (r) => {
       if (view.coverProperty === 'none') return null;
       const files = coverProp ? rawValue(r, coverProp) || [] : [];
-      const img = files.find((f) => /\.(png|jpe?g|gif|webp|svg|avif)(\?|$)/i.test(f.url) || f.storageId) || files[0];
-      return img?.url || (view.coverProperty === 'content' || !coverProp ? r.cover : null) || r.cover || null;
+      const img = files.find((f) => f.thumbnail || /\.(png|jpe?g|gif|webp|svg|avif)(\?|$)/i.test(f.url) || f.storageId) || files[0];
+      return img?.thumbnail || img?.url || (view.coverProperty === 'content' || !coverProp ? r.cover : null) || r.cover || null;
     };
     return h(
       'div',

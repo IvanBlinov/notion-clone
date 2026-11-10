@@ -1,7 +1,8 @@
 import { ConvexError } from 'convex/values';
 import { WorkspaceModel } from '../../src/shared/model.js';
 import { sha256 } from './sha256.js';
-import { emitEvents, pageEvents } from '../webhooks.js';
+import { pageEvents } from '../webhooks.js';
+import { recordEvents } from '../events.js';
 
 export const DAY = 86400_000;
 export const COLORS = ['#e16259', '#d9730d', '#cb912f', '#448361', '#337ea9', '#9065b0', '#c14c8a', '#2e7d7a'];
@@ -103,7 +104,7 @@ export async function loadWorkspace(ctx, workspaceId) {
     before.set(pid, JSON.stringify(pages[pid]));
   }
   const model = new WorkspaceModel(pages, await workspaceMembers(ctx, workspaceId));
-  /** opts.actor: who made the change (for webhook events). */
+  /** opts.actor / opts.actorId: who made the change (for the change feed and webhooks). */
   async function commit(opts = {}) {
     const now = model.data.pages;
     const changed = [];
@@ -121,9 +122,7 @@ export async function loadWorkspace(ctx, workspaceId) {
       await ctx.db.delete(id);
       changed.push({ pid, old: JSON.parse(before.get(pid)), now: null });
     }
-    if (changed.length && ctx.scheduler && (await ctx.db.query('webhooks').withIndex('by_workspace', (q) => q.eq('workspaceId', workspaceId)).first())) {
-      await emitEvents(ctx, workspaceId, pageEvents(model, changed, opts.actor));
-    }
+    if (changed.length) await recordEvents(ctx, workspaceId, pageEvents(model, changed, opts.actor, opts.actorId));
   }
   return { model, commit };
 }

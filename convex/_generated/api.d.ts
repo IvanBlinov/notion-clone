@@ -13,6 +13,8 @@ import type * as auth from "../auth.js";
 import type * as authNode from "../authNode.js";
 import type * as comments from "../comments.js";
 import type * as crons from "../crons.js";
+import type * as events from "../events.js";
+import type * as fileImport from "../fileImport.js";
 import type * as files from "../files.js";
 import type * as http from "../http.js";
 import type * as lib_sha256 from "../lib/sha256.js";
@@ -36,6 +38,8 @@ declare const fullApi: ApiFromModules<{
   authNode: typeof authNode;
   comments: typeof comments;
   crons: typeof crons;
+  events: typeof events;
+  fileImport: typeof fileImport;
   files: typeof files;
   http: typeof http;
   "lib/sha256": typeof lib_sha256;

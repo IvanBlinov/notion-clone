@@ -28,11 +28,60 @@ const unwrap = (err) => {
 const site = () => (process.env.CONVEX_SITE_URL || '').replace(/\/$/, '');
 const base64url = (bytes) => btoa(String.fromCharCode(...new Uint8Array(bytes))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const failWith = (message) => Object.assign(new Error(message), { data: { status: 400, message } });
+
+/** Values like {"url": "…", "import": true} inside item properties: import them first, then store the copy. */
+async function importInlineFiles(ctx, token, args) {
+  const found = [];
+  const walk = (x) => {
+    if (Array.isArray(x)) x.forEach(walk);
+    else if (x && typeof x === 'object') {
+      if (x.import === true && (x.url || x.data_base64)) found.push(x);
+      else Object.values(x).forEach(walk);
+    }
+  };
+  walk(args);
+  if (!found.length) return args;
+  if (found.length > 50) throw failWith('At most 50 files to import per call; split the items into smaller calls');
+  const results = await ctx.runAction(internal.fileImport.importForAgent, { token, files: found.map(({ url, data_base64, name, key, content_type }) => ({ url, data_base64, name, key, content_type })) });
+  const bad = results.find((r) => !r.ok);
+  if (bad) throw failWith(`Importing ${found[bad.index].url || found[bad.index].name || 'a file'} failed: ${bad.error}`);
+  found.forEach((x, i) => {
+    const r = results[i];
+    for (const k of Object.keys(x)) delete x[k];
+    Object.assign(x, { name: r.name, url: r.url, ...(r.thumbnail ? { thumbnail: r.thumbnail } : {}), storageId: r.storageId });
+  });
+  return args;
+}
+
+/** One agent call: file imports and waiting for changes happen here (actions), the rest in agent.call. */
+async function runAgent(ctx, token, method, rawArgs, tool) {
+  const call = (args) => ctx.runMutation(internal.agent.call, { token, method, args, tool });
+  let args = withSecret(method, rawArgs);
+  if (method === 'importFiles') {
+    if (!(await ctx.runQuery(internal.agent.check, { token }))) throw failWith('Invalid or revoked agent token');
+    return { files: await ctx.runAction(internal.fileImport.importForAgent, { token, files: args.files }) };
+  }
+  if (['createRows', 'updateRows', 'upsertRows', 'saveTemplate'].includes(method)) args = await importInlineFiles(ctx, token, args);
+  if (method === 'listEvents' && Number(args.waitSeconds) > 0) {
+    const deadline = Date.now() + Math.min(50, Number(args.waitSeconds)) * 1000;
+    let result = await call(args);
+    while (!result.events.length && Date.now() < deadline) {
+      await sleep(1000);
+      const seq = await ctx.runQuery(internal.agent.feedSeq, { token });
+      if (seq != null && seq > result.cursor) result = await call({ ...args, cursor: result.cursor, since: undefined });
+    }
+    return result;
+  }
+  return call(args);
+}
+
 /** The page API as seen by one agent token. */
 function agentApi(ctx, token) {
   let tool;
   return {
-    call: (method, args) => ctx.runMutation(internal.agent.call, { token, method, args: withSecret(method, args), tool }).catch(unwrap),
+    call: (method, args) => runAgent(ctx, token, method, args, tool).catch(unwrap),
     onTool: (name) => {
       tool = name;
     },
@@ -90,7 +139,7 @@ route('/agent/rpc', 'POST', async (ctx, request) => {
   if (!token) return json(401, { error: 'Agent token required' });
   const { method, args, tool } = await request.json().catch(() => ({}));
   try {
-    const result = await ctx.runMutation(internal.agent.call, { token, method: String(method || ''), args: withSecret(method, args), tool });
+    const result = await runAgent(ctx, token, String(method || ''), args, tool);
     return json(200, { result });
   } catch (err) {
     return json(err?.data?.status || 500, { error: err?.data?.message || err.message });

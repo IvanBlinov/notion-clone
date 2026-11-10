@@ -892,19 +892,49 @@ export class WorkspaceModel {
         this.#touch(r, actor);
       }
     }
-    if (prop.type === 'relation' && (s.twoWay || s.two_way)) {
-      const tdb = this.data.pages[prop.databaseId];
-      const td = tdb.database;
-      const taken = (n) => [DB.titleProp(td), ...td.properties].some((x) => x.name.toLowerCase() === n.toLowerCase());
-      let rname = String(s.reverseName || s.reverse_name || db.title || 'Related').trim().slice(0, 60);
-      for (let i = 2; taken(rname); i++) rname = `${String(s.reverseName || s.reverse_name || db.title || 'Related').slice(0, 55)} ${i}`;
-      const reverse = { id: newId().slice(0, 8), name: rname, type: 'relation', databaseId: db.id, reverseId: prop.id };
-      if (s.reverseLimit === 1 || s.reverse_limit === 1) reverse.limit = 1;
-      td.properties.push(reverse);
-      prop.reverseId = reverse.id;
-      if (tdb !== db) this.#touch(tdb, actor);
-    }
+    if (prop.type === 'relation' && (s.twoWay || s.two_way)) this.#addReverse(db, prop, s, actor);
     return prop;
+  }
+  /**
+   * Make a relation two-way: add the reverse property to the other database and fill it
+   * from the links that already exist (so an existing one-way relation keeps its values).
+   */
+  #addReverse(db, prop, s, actor) {
+    const tdb = this.data.pages[prop.databaseId];
+    const td = tdb?.database;
+    if (!td) throw bad(`Relation "${prop.name}": the related database is missing`);
+    const base = String(s.reverseName || s.reverse_name || db.title || 'Related').trim().slice(0, 60) || 'Related';
+    const taken = (n) => [DB.titleProp(td), ...td.properties].some((x) => x.name.toLowerCase() === n.toLowerCase());
+    let rname = base;
+    for (let i = 2; taken(rname); i++) rname = `${base.slice(0, 55)} ${i}`;
+    const reverse = { id: newId().slice(0, 8), name: rname, type: 'relation', databaseId: db.id, reverseId: prop.id };
+    if (s.reverseLimit === 1 || s.reverse_limit === 1) reverse.limit = 1;
+    td.properties.push(reverse);
+    prop.reverseId = reverse.id;
+    for (const r of this.#children(db.id)) {
+      for (const id of r.props?.[prop.id] || []) {
+        const t = this.data.pages[id];
+        if (!t || t.parentId !== tdb.id) continue;
+        t.props ||= {};
+        const list = t.props[reverse.id] || [];
+        if (list.includes(r.id)) continue;
+        t.props[reverse.id] = reverse.limit === 1 ? [r.id] : [...list, r.id];
+        if (t !== r) this.#touch(t, actor);
+      }
+    }
+    if (tdb !== db) this.#touch(tdb, actor);
+    return reverse;
+  }
+  /** Turn a two-way relation back into a one-way one (the reverse property goes away). */
+  #dropReverse(prop, actor) {
+    const tdb = this.data.pages[prop.databaseId];
+    const reverse = tdb?.database?.properties.find((x) => x.id === prop.reverseId);
+    if (reverse) {
+      this.#removeProperty(tdb, { ...reverse, reverseId: undefined }, actor);
+      this.#refreshLinkedViews(tdb, actor);
+      this.#touch(tdb, actor);
+    }
+    delete prop.reverseId;
   }
   /** Remove a property (and the other side of a two-way relation). */
   #removeProperty(db, prop, actor) {
@@ -1036,6 +1066,30 @@ export class WorkspaceModel {
           if (u[k] !== undefined) cfg[key] = u[k];
         if (Object.keys(cfg).length) DB.configureProperty(d, prop, cfg, env, false);
       }
+      if (prop.type === 'relation') {
+        const tw = u.twoWay ?? u.two_way;
+        const rn = u.reverseName ?? u.reverse_name;
+        if (tw === false && prop.reverseId) {
+          this.#dropReverse(prop, actor);
+          removed = true;
+        } else if (tw === true && !prop.reverseId) {
+          this.#addReverse(p, prop, { reverseName: rn, reverseLimit: u.reverseLimit ?? u.reverse_limit }, actor);
+        } else if (rn !== undefined && prop.reverseId) {
+          const tdb = this.data.pages[prop.databaseId];
+          const td = tdb?.database;
+          const reverse = td?.properties.find((x) => x.id === prop.reverseId);
+          const n = String(rn).trim().slice(0, 60);
+          if (reverse && n && n !== reverse.name) {
+            if ([DB.titleProp(td), ...td.properties].some((x) => x.id !== reverse.id && x.name.toLowerCase() === n.toLowerCase())) throw bad(`"${tdb.title}" already has a property named "${n}"`);
+            reverse.name = n;
+            this.#touch(tdb, actor);
+          }
+        } else if (rn !== undefined && !prop.reverseId && tw !== false) {
+          throw bad(`"${prop.name}" is one-way; pass two_way: true to add the reverse property`);
+        }
+      } else if ((u.twoWay ?? u.two_way) !== undefined) {
+        throw bad(`two_way only applies to relation properties; "${prop.name}" is ${prop.type}`);
+      }
       if (u.options && prop.options) for (const o of u.options) DB.addOption(prop, typeof o === 'string' ? o : o.name, o?.color, o?.group);
       if (u.renameOptions && prop.options) {
         for (const [from, to] of Object.entries(u.renameOptions)) {
@@ -1113,7 +1167,12 @@ export class WorkspaceModel {
       delete prop.reverseId;
     }
     const scratch = { titleName: '\u0000', properties: d.properties.filter((x) => x.id !== prop.id) };
-    const spec = { name: prop.name, type, options: [], expression: u.expression, relation: u.relation, property: u.rollupProperty, function: u.function, value: u.value, format: u.format, display: u.display, prefix: u.prefix, databaseId: u.databaseId, limit: u.limit };
+    // select ⇄ status ⇄ multi-select keep every option (colors too); status groups come from
+    // option_groups, an earlier status group, or the option's name
+    const OPT = ['select', 'status', 'multi_select'];
+    const groups = Object.fromEntries(Object.entries(u.optionGroups || {}).map(([k, g]) => [k.toLowerCase(), g]));
+    const keep = OPT.includes(prop.type) && OPT.includes(type) ? (prop.options || []).map((o) => ({ name: o.name, color: o.color, group: type === 'status' ? groups[o.name.toLowerCase()] || o.group : undefined })) : [];
+    const spec = { name: prop.name, type, options: keep, expression: u.expression, relation: u.relation, property: u.rollupProperty, function: u.function, value: u.value, format: u.format, display: u.display, prefix: u.prefix, databaseId: u.databaseId, limit: u.limit };
     const next = DB.makeProperty(scratch, spec, env);
     const rows = this.#children(db.id);
     const texts = new Map(rows.map((r) => [r.id, DB.valueText(prop, r.props?.[prop.id], this.members, env)]));

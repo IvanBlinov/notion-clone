@@ -49,7 +49,11 @@ owners, statuses, dates or numbers. Each item is also a page, so it can have Mar
 - Person values: member id, email, unambiguous name, "me" (the user) or "@agent" (you). Dates: YYYY-MM-DD,
   "today", "+7d", or date-times like 2026-11-08T00:51:17Z; ranges as {"start": …, "end": …}.
 - Comments: list_comments (e.g. unresolved answers from the owner), add_comment, resolve_comment.
-- list_changes tells you what changed since your last session; create_webhook pushes changes to a URL.
+- list_events is the change feed: keep its cursor between calls to get only new events (filter by type, database,
+  property, e.g. Status changes or comment.added; exclude_self skips your own edits); wait_seconds waits for the
+  next one. list_changes gives current state of everything edited since a time; create_webhook pushes to a URL.
+- import_files copies files (URL or base64) into notion-clone with thumbnails; in item values
+  {"url": …, "import": true, "key": …} does the same inline. Stored file urls never expire.
 - create_linked_database_view shows a database inside any other page as a live, filtered table or board (e.g. only
   this stage's tasks on a stage page). It uses the same records; new items added there get the filtered values.
   In Markdown it appears as "[View name](database_view:BLOCK_ID)"; keep that line in replace_page_content to keep it.
@@ -576,6 +580,9 @@ export function createMcpServer(api, opts = {}) {
               function: z.enum(ROLLUP_FUNCTIONS).optional().describe('rollup function'),
               value: z.string().optional().describe('rollup: value for count_where / percent_where'),
               database_id: z.string().optional().describe('relation target (when changing the type to relation)'),
+              two_way: z.boolean().optional().describe('relation: true adds the reverse property to the other database (filled from the existing links); false removes it, leaving a one-way relation'),
+              reverse_name: z.string().optional().describe('relation: name of the reverse property (renames it if it exists)'),
+              reverse_limit: z.literal(1).optional().describe('relation: 1 = each item on the other side links back to at most one item'),
               format: z.enum(NUMBER_FORMATS).optional(),
               display: z.enum(['number', 'bar', 'ring']).optional(),
               prefix: z.string().optional().describe('unique_id prefix'),
@@ -616,6 +623,9 @@ export function createMcpServer(api, opts = {}) {
           function: u.function,
           value: u.value,
           databaseId: u.database_id,
+          twoWay: u.two_way,
+          reverseName: u.reverse_name,
+          reverseLimit: u.reverse_limit,
           format: u.format,
           display: u.display,
           prefix: u.prefix,
@@ -964,6 +974,60 @@ export function createMcpServer(api, opts = {}) {
     async ({ since, database_id, limit }) => {
       const r = await api.call('listChanges', { since, databaseId: database_id || null, limit: limit || 100 });
       return out({ ...r, changes: await withUrls(r.changes) });
+    },
+  );
+
+  tool(
+    'list_events',
+    {
+      title: 'Change feed (with waiting)',
+      description:
+        'Events in order: item.created / item.updated (with the changed properties, e.g. Status from "In progress" to "Done") / item.archived, page.*, database.*, comment.added, comment.resolved. Call it without cursor once to get the current cursor (and recent events); then pass that cursor to get only what happened after it, and keep the returned cursor for next time. wait_seconds (up to 50) waits for the next matching event instead of returning an empty list, so a session can wait for the owner to answer or move a task. exclude_self skips your own edits.',
+      inputSchema: {
+        cursor: z.number().int().min(0).optional().describe('From the previous result; only newer events are returned'),
+        since: z.string().optional().describe('Instead of a cursor: events since this ISO date-time (the feed keeps 30 days)'),
+        types: z.array(z.string()).optional().describe('e.g. ["item.updated", "comment.added"] or ["comment.*"]'),
+        database_id: z.string().optional().describe('Only this database and its items'),
+        page_id: z.string().optional().describe('Only this page or item'),
+        properties: z.array(z.string()).optional().describe('item.updated events only when one of these properties changed, e.g. ["Status"]'),
+        exclude_self: z.boolean().optional().describe('Skip events caused by this agent token'),
+        wait_seconds: z.number().int().min(0).max(50).optional().describe('Wait up to this long for a matching event (long poll)'),
+        limit: z.number().int().min(1).max(500).optional().describe('Default 100; "more": true means call again with the new cursor'),
+      },
+      annotations: { readOnlyHint: true },
+    },
+    async ({ cursor, since, types, database_id, page_id, properties, exclude_self, wait_seconds, limit }) => {
+      const r = await api.call('listEvents', defined({ cursor, since, types, databaseId: database_id, pageId: page_id, properties, excludeSelf: exclude_self, waitSeconds: wait_seconds, limit }));
+      const b = await base();
+      const link = (id) => (b && id ? `${b}#/${id}` : undefined);
+      return out({ ...r, events: r.events.map((e) => ({ ...e, url: link(e.page?.id) })) });
+    },
+  );
+
+  tool(
+    'import_files',
+    {
+      title: 'Store files in notion-clone',
+      description:
+        'Copy files into notion-clone storage from a URL (e.g. a signed link that will expire) or base64 data, up to 50 per call, 20 MB each. Returns permanent urls plus a thumbnail (≤480 px) for PNG / JPEG images; galleries and file chips show the thumbnail. The same content is stored once; pass a key (e.g. "look:123:v2") to skip the download entirely when that key was imported before. Use the results as files property values. Shortcut: in create / update / upsert items, a files value like {"url": "https://…", "name": "front.png", "key": "look:123:v2", "import": true} is imported automatically.',
+      inputSchema: {
+        files: z
+          .array(
+            z.object({
+              url: z.string().optional().describe('http(s) URL to download'),
+              data_base64: z.string().optional().describe('File content as base64 (instead of url)'),
+              name: z.string().optional().describe('File name (default: from the URL)'),
+              key: z.string().optional().describe('Your stable id for this file; a known key returns the stored file without downloading'),
+              content_type: z.string().optional(),
+            }),
+          )
+          .min(1)
+          .max(50),
+      },
+    },
+    async ({ files }) => {
+      const r = await api.call('importFiles', { files });
+      return out({ files: r.files.map(({ storageId, ...f }) => ({ ...f, storage_id: storageId })), use_as: 'files property value: [{"name": …, "url": …, "thumbnail": …}]' });
     },
   );
 

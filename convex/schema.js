@@ -132,6 +132,38 @@ export default defineSchema({
     failures: v.number(),
   }).index('by_workspace', ['workspaceId']),
 
+  // Change feed: every saved change appends its events (page / item / database / comment) with a
+  // per-workspace sequence number, so agents can read "everything after cursor N" and wait for more.
+  events: defineTable({
+    workspaceId: v.id('workspaces'),
+    seq: v.number(),
+    at: v.number(),
+    events: v.any(),
+  })
+    .index('by_seq', ['workspaceId', 'seq'])
+    .index('by_at', ['at']),
+  eventSeq: defineTable({ workspaceId: v.id('workspaces'), seq: v.number() }).index('by_workspace', ['workspaceId']),
+
+  // Files stored in Convex storage (uploads and imports), with a generated thumbnail for images.
+  files: defineTable({
+    workspaceId: v.id('workspaces'),
+    storageId: v.id('_storage'),
+    thumbId: v.union(v.id('_storage'), v.null()),
+    sha256: v.string(),
+    key: v.union(v.string(), v.null()),
+    name: v.string(),
+    size: v.number(),
+    contentType: v.union(v.string(), v.null()),
+    width: v.union(v.number(), v.null()),
+    height: v.union(v.number(), v.null()),
+    sourceUrl: v.union(v.string(), v.null()),
+    createdAt: v.number(),
+  })
+    .index('by_hash', ['workspaceId', 'sha256'])
+    .index('by_key', ['workspaceId', 'key'])
+    .index('by_storage', ['storageId'])
+    .index('by_workspace', ['workspaceId']),
+
   presence: defineTable({
     workspaceId: v.id('workspaces'),
     clientId: v.string(),

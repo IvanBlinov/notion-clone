@@ -836,14 +836,15 @@ const dbDeps = {
   databases: () => [...state.flat.values()].filter((n) => n.kind === 'database').map((n) => ({ id: n.id, title: label(n), icon: n.icon })),
   /** Schema of another database (for rollup settings). */
   databaseSchema: (id) => query(cx.pages.rows, { ...ws(), pageId: id }),
-  /** Upload a file for a files property → { name, url, storageId }. */
+  /** Upload a file for a files property → { name, url, thumbnail, storageId }. */
   upload: async (file) => {
     if (file.size > 20 * 1024 * 1024) throw new Error(`${file.name} is larger than 20 MB`);
     const url = await mutation(cx.files.uploadUrl, ws());
     const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': file.type || 'application/octet-stream' }, body: file });
     if (!res.ok) throw new Error(`Upload failed (${res.status})`);
     const { storageId } = await res.json();
-    return mutation(cx.files.register, { ...ws(), storageId, name: file.name });
+    // stores the file record and a thumbnail for images (falls back to a plain register)
+    return action(cx.fileImport.finishUpload, { ...ws(), storageId, name: file.name }).catch(() => mutation(cx.files.register, { ...ws(), storageId, name: file.name }));
   },
 };
 // Linked database views embedded in pages: one live component per block, reused across redraws.

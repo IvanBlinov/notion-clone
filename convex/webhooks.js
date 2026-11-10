@@ -53,12 +53,20 @@ export async function emitEvents(ctx, workspaceId, events) {
 }
 
 /** Events for the pages a mutation changed (old JSON → new page). */
-export function pageEvents(model, changed, actorName) {
+export function pageEvents(model, changed, actorName, actorId) {
   const pages = model.data.pages;
   const comp = DB.createComputer({ pages, members: model.members });
   const env = { titleOf: comp.titleOf };
   const at = new Date().toISOString();
   const out = [];
+  const oldSchema = new Map(changed.filter((c) => c.old?.database).map((c) => [c.pid, c.old.database.properties]));
+  const show = (prop, v) => {
+    try {
+      return DB.displayValue(prop, v, model.members, env);
+    } catch {
+      return v == null ? null : String(v);
+    }
+  };
   for (const { pid, old, now } of changed) {
     const p = now || old;
     const parent = p.parentId ? pages[p.parentId] || null : null;
@@ -69,7 +77,7 @@ export function pageEvents(model, changed, actorName) {
     else if (!old.archivedAt && now.archivedAt) type = 'archived';
     else if (old.archivedAt && !now.archivedAt) type = 'restored';
     else type = 'updated';
-    const e = { event: `${kind}.${type}`, at, actor: actorName || p.lastEditedBy || null, page: { id: p.id, title: p.title, kind } };
+    const e = { event: `${kind}.${type}`, at, actor: actorName || p.lastEditedBy || null, ...(actorId ? { actorId } : {}), page: { id: p.id, title: p.title, kind } };
     if (kind === 'item') {
       e.databaseId = parent.id;
       e.database = { id: parent.id, title: parent.title };
@@ -85,7 +93,8 @@ export function pageEvents(model, changed, actorName) {
           const a = old.props?.[prop.id];
           const b = now.props?.[prop.id];
           if (stable(a) === stable(b)) continue;
-          changes[prop.name] = { from: DB.displayValue(prop, a, model.members, env), to: DB.displayValue(prop, b, model.members, env) };
+          const oldProp = oldSchema.get(parent.id)?.find((x) => x.id === prop.id) || prop; // a retyped property shows its old value the old way
+          changes[prop.name] = { from: show(oldProp, a), to: show(prop, b) };
         }
       }
       if (kind === 'database' && stable(old.database?.properties) !== stable(now.database?.properties)) changes.schema = true;
@@ -94,7 +103,7 @@ export function pageEvents(model, changed, actorName) {
     }
     if (kind === 'item' && type === 'created') {
       const r = comp.row(parent.id, p.id) || p;
-      e.properties = Object.fromEntries(parent.database.properties.map((prop) => [prop.name, DB.displayValue(prop, DB.rawValue(r, prop), model.members, env)]).filter(([, v]) => v != null && v !== false));
+      e.properties = Object.fromEntries(parent.database.properties.map((prop) => [prop.name, show(prop, DB.rawValue(r, prop))]).filter(([, v]) => v != null && v !== false));
     }
     out.push(e);
   }

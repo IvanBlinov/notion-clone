@@ -330,6 +330,9 @@ function fileList(raw, kind) {
     const item = { url: url.slice(0, 2000) };
     if (label) item[kind === 'files' ? 'name' : 'label'] = label;
     if (kind === 'files' && o.storageId) item.storageId = String(o.storageId);
+    const thumb = String(o.thumbnail || '').trim();
+    if (kind === 'files' && /^https?:\/\//i.test(thumb)) item.thumbnail = thumb.slice(0, 2000);
+    if (o.import === true) throw bad(`Files with "import": true are imported by the MCP tools; "${url}" reached the database without being imported`);
     out.push(item);
   }
   if (out.length > 50) throw bad('At most 50 entries');

@@ -94,7 +94,7 @@ export const run = mutation({
     const { user, model, commit } = await open(ctx, session, workspaceId);
     const actor = { client: clientId || 'web', kind: 'user', name: user.name, userId: user._id };
     const result = runModel(() => model[method](args || {}, actor));
-    await commit({ actor: user.name });
+    await commit({ actor: user.name, actorId: user._id });
     return result ?? null;
   },
 });
